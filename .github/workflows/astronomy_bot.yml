@@ -1,0 +1,57 @@
+name: 🔭 שמי הלילה – בוט אסטרונומיה יומי
+
+on:
+  schedule:
+    # ═══════════════════════════════════════════════════════
+    # ימים א'–ה' (ראשון עד חמישי): שליחה ב-16:30 UTC = 19:30 שעון ישראל
+    # ימי שישי: הסקריפט יקבל החלטה עצמאית (is_erev=True → לא שולח)
+    # שבת: לא רץ בכלל
+    # מוצאי שבת (שבת בלילה): רץ ב-17:00 UTC, הסקריפט ממתין להבדלה
+    # ═══════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════════
+    # פעם ביום, ימים א'–ו':
+    #   14:00 UTC = 16:00 שעון חורף ישראל (UTC+2)
+    #   14:00 UTC = 17:00 שעון קיץ ישראל (UTC+3)
+    # הסקריפט עצמו מחליט אם לשלוח (ערב שבת/חג → לא שולח)
+    # ═══════════════════════════════════════════════════════
+    - cron: '0 14 * * 0-5'   # ראשון–שישי, 14:00 UTC
+
+  workflow_dispatch:         # הרצה ידנית לבדיקה
+    inputs:
+      test_mode:
+        description: 'מצב בדיקה – מדפיס בלבד, לא שולח WhatsApp'
+        required: false
+        default: 'false'
+
+jobs:
+  send-astronomy-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 התקנת ספריות
+        run: pip install -r requirements.txt
+
+      - name: 🔭 הרצת בוט האסטרונומיה
+        env:
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          GREEN_API_INSTANCE:  ${{ secrets.GREEN_API_INSTANCE }}
+          GREEN_API_TOKEN:     ${{ secrets.GREEN_API_TOKEN }}
+          WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}
+          TEST_MODE:           ${{ github.event.inputs.test_mode }}
+        run: python shamay_halayla.py
+
+      - name: 📊 שמירת לוג
+        if: always()
+        run: |
+          echo "הרצה הסתיימה בשעה $(date '+%Y-%m-%d %H:%M:%S UTC')"

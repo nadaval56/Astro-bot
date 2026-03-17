@@ -95,11 +95,44 @@ def get_kiddush_levana_info() -> dict:
         for item in items:
             if item.get("category") == "molad":
                 try:
-                    dt  = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                    # Hebcal מחזיר את תאריך שבת מברכים ב-item["date"]
+                    # אבל הזמן האמיתי של המולד כתוב בכותרת:
+                    # "Molad Nisan: Wednesday, 16:34 and 13 chalakim"
+                    # לכן אנו מחשבים את התאריך האמיתי מתוך הכותרת
+                    title = item.get("title", "")
+                    # יום השבוע האנגלי → ספרה
+                    DAY_MAP = {
+                        "sunday": 6, "monday": 0, "tuesday": 1, "wednesday": 2,
+                        "thursday": 3, "friday": 4, "saturday": 5
+                    }
+                    molad_dt = None
+                    for day_name, day_num in DAY_MAP.items():
+                        if day_name in title.lower():
+                            # מצא את השעה מהכותרת: "16:34"
+                            import re
+                            time_match = re.search(r'(\d{1,2}):(\d{2})', title)
+                            if time_match:
+                                h, m = int(time_match.group(1)), int(time_match.group(2))
+                                # תאריך הכרזה (שבת מברכים)
+                                announce_date = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                                # חפש את ה-day_num הקרוב ביותר לשבת מברכים
+                                for delta in range(-7, 8):
+                                    candidate = announce_date + timedelta(days=delta)
+                                    if candidate.weekday() == day_num:
+                                        molad_dt = candidate.replace(
+                                            hour=h, minute=m, second=0, microsecond=0
+                                        )
+                                        break
+                            break
+
+                    if molad_dt is None:
+                        # fallback: השתמש בתאריך הכרזה
+                        molad_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+
+                    dt  = molad_dt
                     age = (now - dt).total_seconds() / 86400
-                    print(f"🔍 מולד נמצא: {item.get('title')} | {dt.strftime('%d/%m/%Y %H:%M')} | גיל: {round(age,2)} ימים")
+                    print(f"🔍 מולד: {title[:40]} | {dt.strftime('%d/%m/%Y %H:%M')} | גיל: {round(age,2)} ימים")
                     if -1 <= age <= LUNAR_CYCLE_DAYS:
-                        # בדוק שחלון הזמן עוד לא נסגר
                         candidate_close = dt + WINDOW_CLOSE_OFFSET
                         if candidate_close > now:
                             molad = dt

@@ -297,7 +297,9 @@ def get_iss_passes() -> list[str]:
 # ══════════════════════════════════════════
 
 HISTORY_FILE = Path("message_history.json")
-HISTORY_DAYS = 7   # כמה ימים אחורה לשמור
+HISTORY_DAYS = 7
+
+DIRECTION_NAMES = ["צפון","צ-מ","מזרח","ד-מ","דרום","ד-מ","מערב","צ-מ"]
 
 
 # ══════════════════════════════════════════

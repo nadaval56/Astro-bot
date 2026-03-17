@@ -206,8 +206,8 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
     now  = datetime.now(ISRAEL_TZ)
     hday = info.get("hebrew_day", 0)
 
-    # שתיקה מוחלטת לפני ב' ואחרי הסגירה
-    if hday < 2 or now > info["window_close"]:
+    # שתיקה מוחלטת לפני ב', אחרי הסגירה, או לפני שהחלון בכלל נפתח
+    if hday < 2 or now > info["window_close"] or now < ash_open - timedelta(hours=24):
         return None
 
     ash_open  = info["ashkenaz_open"]

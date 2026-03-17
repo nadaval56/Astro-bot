@@ -622,7 +622,8 @@ def generate_message(payload: dict) -> str:
 • עברית בלבד – ללא ערבוב שפות
 • "בעין בלתי מזוינת" – הביטוי המותר
 • "משקפת" – לא "דו-עינית"
-• אסור: "בראייה ערומה", "בעין רגילה", "דו-עינית"
+• "מטר מטאורים" – לא "מקלחת מטאורים"
+• אסור: "בראייה ערומה", "בעין רגילה", "דו-עינית", "מקלחת מטאורים"
 
 תוכן:
 • עננות – התייחס לפי הסטטוס:
@@ -683,7 +684,15 @@ def generate_message(payload: dict) -> str:
         ]
 
         if resp.get("stop_reason") == "end_turn":
-            return "\n".join(text_blocks).strip()
+            raw = "\n".join(text_blocks).strip()
+            # חיתוך כל פתיח שקלוד מוסיף לפני ההודעה עצמה.
+            # ההודעה תמיד מתחילה ב"ערב טוב" / "לילה טוב"
+            for marker in ["ערב טוב", "לילה טוב"]:
+                idx = raw.find(marker)
+                if idx > 0:
+                    raw = raw[idx:]
+                    break
+            return raw
 
         # אם Claude השתמש בכלי חיפוש – מוסיפים לשרשרת ומשלחים
         if resp.get("stop_reason") == "tool_use":

@@ -115,8 +115,8 @@ def get_kiddush_levana_info() -> dict:
                                 h, m = int(time_match.group(1)), int(time_match.group(2))
                                 # תאריך הכרזה (שבת מברכים)
                                 announce_date = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                                # חפש את ה-day_num הקרוב ביותר לשבת מברכים
-                                for delta in range(-7, 8):
+                                # המולד תמיד אחרי שבת מברכים – חפש קדימה בלבד
+                                for delta in range(0, 8):
                                     candidate = announce_date + timedelta(days=delta)
                                     if candidate.weekday() == day_num:
                                         molad_dt = candidate.replace(

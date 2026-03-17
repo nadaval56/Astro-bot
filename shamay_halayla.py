@@ -527,11 +527,208 @@ def get_historical_event() -> str | None:
 
 def generate_message(payload: dict) -> str:
     """
-    שולח את כל הנתונים ל-Claude עם כלי web_search.
-    Claude יחפש אוטומטית אירועים שוטפים:
-      כוכבי שביט, ליקויים, מטאורים, שיגורי Starlink, תגליות חדשות.
-    תשובת Claude עוברת עיבוד שמשרשר את כל בלוקי הטקסט.
+    שולח את כל הנתונים ל-Claude עם כלי web_search ו-Prompt Caching.
+    החלק הסטטי (כללי כתיבה) נשמר במטמון – חיסכון של ~90% על אותם טוקנים.
     """
+    cloud_pct    = payload["cloud_pct"]
+    cloud_desc   = payload["cloud_desc"]
+    astro        = payload["astro"]
+    iss          = payload["iss"]
+    j_events     = payload["jewish_events"]
+    jdate        = payload["jdate"]
+    historical   = payload["historical"]
+    date_str     = payload["date_str"]
+
+    kl_message   = payload.get("kl_message")
+    tekufa_msg   = payload.get("tekufa_msg")
+    upcoming     = payload.get("upcoming", [])
+    history_text = payload.get("history_text", "אין היסטוריה.")
+
+    upcoming_str = ""
+    if upcoming:
+        lines = []
+        for ev in upcoming[:5]:
+            d = ev["days_away"]
+            when = "מחר" if d == 1 else f"בעוד {d} ימים"
+            lines.append(f"  • {when}: {ev['title']}")
+        upcoming_str = "\n".join(lines)
+
+    # ══════════════════════════════════════════
+    # חלק סטטי – נשמר במטמון (cache_control)
+    # משתנה רק כשמעדכנים את הקוד
+    # ══════════════════════════════════════════
+    STATIC_RULES = f"""אתה כותב הודעה יומית לקבוצת WhatsApp של חובבי אסטרונומיה בישראל – קהל מעורב (אשכנזים וספרדים).
+כתוב בעברית תקנית, ידידותית ומרתקת. השתמש באימוג'י במידה.
+ההודעה תוצג ב-WhatsApp – שמור על כתיבה RTL נקייה ובעברית בלבד.
+אל תשלב אותיות ערביות, לטיניות או כל שפה אחרת בתוך מילים עבריות.
+
+═══════════════════════════════
+כללי כתיבה – חובה לקיים את כולם:
+═══════════════════════════════
+
+עיצוב:
+• פתח תמיד ב"ערב טוב" או "לילה טוב" (לפי שעת השקיעה) – משפט פתיחה קצר וחם
+• בשורה השנייה – תמיד התאריך: "17.3.2026 | כ״ח אדר תשפ״ו" (תאריך לועזי | תאריך עברי). זה קבוע בכל הודעה
+• לאחר מכן – ישירות לתוכן, ללא הקדמות כמו "הנה ההודעה..."
+• בWhatsApp: *כוכבית אחת* = בולד. אל תשתמש ב-**כוכביות כפולות**
+
+שפה:
+• עברית בלבד – ללא ערבוב שפות
+• "בעין בלתי מזוינת" – הביטוי המותר
+• "משקפת" – לא "דו-עינית"
+• "מטר מטאורים" – לא "מקלחת מטאורים"
+• אסור: "בראייה ערומה", "בעין רגילה", "דו-עינית", "מקלחת מטאורים"
+
+תוכן:
+• עננות – התייחס לפי הסטטוס:
+  עד {CLOUD_CLEAR}%    → לילה מושלם
+  {CLOUD_CLEAR}–{CLOUD_HOPEFUL}%  → "יש סיכוי לחלונות פתוחים"
+  {CLOUD_HOPEFUL}–{CLOUD_POOR}%  → "בתקווה שהענן ייפתח..."
+  מעל {CLOUD_POOR}%   → אל תדכא – ספר מה מחכה בימים הקרובים
+• ISS – ציין רק אם עננות מאפשרת (מתחת ל-{CLOUD_POOR}%)
+• סטארלינק – ציין אך ורק אם יש נראות מחושבת מישראל עם שעה מדויקת וכיוון. אחרת – שתיקה
+• שביטים וגופים אחרים – אם נראים בצורה הטובה ביותר מחצי הכדור הדרומי או נמוכים מאוד מישראל – ציין זאת במפורש
+• קידוש לבנה – רק אם רלוונטי לתאריך
+• "הכנת קרקע" – אם יש אירוע מעניין בימים הקרובים, זרוק עליו מילה היום
+
+היסטוריה:
+• אם נושא הוזכר אתמול בפירוט – היום מספיק משפט אחד: "כזכור, שביט MAPS צפוי ל..."
+• אם נושא הוזכר לפני יומיים-שלושה – אפשר להזכיר בקצרה
+• אם נושא לא הוזכר כלל – הצג אותו במלואו
+• אל תחזור על אותו תוכן מילה במילה יום אחרי יום
+
+אורך:
+• מקסימום 150 מילה
+• כל משפט חייב להרוויח את מקומו
+• הקורא שלא קרא – צריך להתחרט. לא מאמר, לא דוח – הודעה חדה וקולעת"""
+
+    # ══════════════════════════════════════════
+    # חלק דינמי – משתנה כל יום (ללא מטמון)
+    # ══════════════════════════════════════════
+    DYNAMIC_DATA = f"""לפני שתכתוב – חפש באינטרנט אירועים אסטרונומיים מעניינים לתאריך {date_str}:
+  • כוכבי שביט הנראים כרגע
+  • ליקויי ירח/שמש בימים הקרובים
+  • מטר מטאורים פעיל כעת
+  • שיגורי Starlink הנראים מישראל – עם שעה מדויקת וכיוון בשמיים
+  • אירועים אסטרונומיים בולטים השבוע
+
+═══════════════════════════════
+נתוני הערב — {date_str}
+═══════════════════════════════
+
+📅 תאריך עברי: {jdate['day']} ב{jdate['month']} {jdate['year']}
+
+🌤 עננות: {cloud_pct}%
+   הערכה: {cloud_desc}
+
+🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
+   זריחה: {astro.get('moon_rise','N/A')} | שקיעה: {astro.get('moon_set','N/A')}
+
+🌅 שקיעת שמש: {astro.get('sunset','N/A')}
+🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
+
+🪐 כוכבי לכת נראים הלילה:
+{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}
+
+🛸 מעברי ISS:
+{chr(10).join(iss)}
+
+✡️ אירועים יהודיים היום:
+{chr(10).join(j_events) if j_events else "אין אירוע מיוחד הלילה"}
+
+🌙 קידוש לבנה / ברכת הלבנה:
+{kl_message or "לא רלוונטי הלילה"}
+
+🌸 תקופות / היפוכי עונות:
+{tekufa_msg or "אין תקופה קרובה"}
+
+📅 אירועים יהודיים-אסטרונומיים בשבוע הקרוב:
+{upcoming_str or "אין אירועים מיוחדים"}
+
+📜 היום לפני X שנים:
+{historical or "אין אירוע מיוחד ביומן"}
+
+🗂 היסטוריית הודעות אחרונות:
+{history_text}"""
+
+    headers = {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta":    "prompt-caching-2024-07-31",
+        "content-type":      "application/json",
+    }
+
+    # מבנה ה-message עם cache_control על החלק הסטטי
+    initial_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": STATIC_RULES,
+                "cache_control": {"type": "ephemeral"}  # ← נשמר במטמון!
+            },
+            {
+                "type": "text",
+                "text": DYNAMIC_DATA   # ← משתנה כל יום, לא נשמר
+            }
+        ]
+    }
+
+    body = {
+        "model":      CLAUDE_MODEL,
+        "max_tokens": 2000,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages":   [initial_message],
+    }
+
+    messages = [initial_message]
+
+    for attempt in range(5):
+        r = requests.post(CLAUDE_API, headers=headers,
+                          json={**body, "messages": messages}, timeout=120)
+        r.raise_for_status()
+        resp = r.json()
+
+        # דיווח על שימוש במטמון
+        usage = resp.get("usage", {})
+        cache_read    = usage.get("cache_read_input_tokens", 0)
+        cache_written = usage.get("cache_creation_input_tokens", 0)
+        if cache_read:
+            print(f"💾 מטמון: נחסכו {cache_read} טוקנים (90% הנחה)")
+        elif cache_written:
+            print(f"💾 מטמון: נכתבו {cache_written} טוקנים למטמון (פעם ראשונה)")
+
+        text_blocks = [
+            block["text"]
+            for block in resp.get("content", [])
+            if block.get("type") == "text"
+        ]
+
+        if resp.get("stop_reason") == "end_turn":
+            raw = "\n".join(text_blocks).strip()
+            for marker in ["ערב טוב", "לילה טוב"]:
+                idx = raw.find(marker)
+                if idx > 0:
+                    raw = raw[idx:]
+                    break
+            return raw
+
+        if resp.get("stop_reason") == "tool_use":
+            messages.append({"role": "assistant", "content": resp["content"]})
+            tool_results = []
+            for block in resp["content"]:
+                if block.get("type") == "tool_use":
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": block["id"],
+                        "content":     block.get("content", "no results"),
+                    })
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        return "\n".join(text_blocks).strip() or "⚠️ לא הצלחתי לייצר הודעה"
+
+    return "⚠️ חריגת ניסיונות – Claude לא השלים את התשובה"
     cloud_pct    = payload["cloud_pct"]
     cloud_desc   = payload["cloud_desc"]
     astro        = payload["astro"]

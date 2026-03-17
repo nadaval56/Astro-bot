@@ -20,6 +20,7 @@
 
 import os, sys, json, math, time
 from datetime import datetime, timedelta, date
+from pathlib import Path
 import requests
 import pytz
 from jewish_astronomy import (
@@ -295,7 +296,108 @@ def get_iss_passes() -> list[str]:
 # 4. ירח וכוכבי לכת (ephem)
 # ══════════════════════════════════════════
 
-DIRECTION_NAMES = ["צפון","צ-מ","מזרח","ד-מ","דרום","ד-מ","מערב","צ-מ"]
+HISTORY_FILE = Path("message_history.json")
+HISTORY_DAYS = 7   # כמה ימים אחורה לשמור
+
+
+# ══════════════════════════════════════════
+# היסטוריית הודעות
+# ══════════════════════════════════════════
+
+def load_history() -> dict:
+    """טוען היסטוריית הודעות מהקובץ"""
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_history(history: dict, today_key: str, summary: dict):
+    """
+    מוסיף את סיכום היום לקובץ ומנקה ערכים ישנים.
+    summary = dict עם נושאים שכוסו היום ואיך.
+    """
+    history[today_key] = summary
+
+    # מחק ימים ישנים מעבר ל-HISTORY_DAYS
+    cutoff = (datetime.now(ISRAEL_TZ) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    old_keys = [k for k in history if k < cutoff]
+    for k in old_keys:
+        del history[k]
+
+    HISTORY_FILE.write_text(
+        json.dumps(history, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def format_history_for_prompt(history: dict) -> str:
+    """
+    מעצב את ההיסטוריה לטקסט שנכנס לפרומפט.
+    קלוד יקבל תמונה ברורה של מה כוסה לאחרונה.
+    """
+    if not history:
+        return "אין היסטוריה – זו ההודעה הראשונה."
+
+    today = datetime.now(ISRAEL_TZ).date()
+    lines = []
+
+    for date_str in sorted(history.keys(), reverse=True)[:5]:
+        try:
+            d = date.fromisoformat(date_str)
+            days_ago = (today - d).days
+            when = "אתמול" if days_ago == 1 else f"לפני {days_ago} ימים"
+        except Exception:
+            when = date_str
+
+        day_data = history[date_str]
+        topics = "; ".join(
+            f"{k}: {v}" for k, v in day_data.items() if k != "_message_length"
+        )
+        lines.append(f"  • {when} ({date_str}): {topics}")
+
+    return "\n".join(lines)
+
+
+def extract_summary_from_message(message: str, payload: dict) -> dict:
+    """
+    שולח ל-Claude בקשה קצרה לסכם מה כוסה בהודעה – לצורך היסטוריה.
+    מחזיר dict קצר לשמירה.
+    """
+    headers = {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+    }
+    body = {
+        "model":      CLAUDE_MODEL,
+        "max_tokens": 300,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "בהודעה הבאה שנשלחה לקבוצת אסטרונומיה, "
+                "תן לי JSON קצר עם הנושאים שכוסו ואיך (ברמה גבוהה). "
+                "מפתח = שם הנושא באנגלית קצר (comet, meteor_shower, iss, jupiter וכו'), "
+                "ערך = משפט קצר בעברית על מה נאמר. "
+                "החזר JSON בלבד, ללא הסברים.\n\n"
+                f"ההודעה:\n{message}"
+            )
+        }]
+    }
+    try:
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r.raise_for_status()
+        raw = r.json()["content"][0]["text"].strip()
+        # נקה ```json אם יש
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        summary = json.loads(raw)
+        summary["_message_length"] = len(message.split())
+        return summary
+    except Exception as e:
+        print(f"⚠️ לא הצלחתי לסכם היסטוריה: {e}")
+        return {"_message_length": len(message.split())}
 
 def deg_to_dir(deg: float) -> str:
     return DIRECTION_NAMES[round(deg / 45) % 8]
@@ -440,6 +542,7 @@ def generate_message(payload: dict) -> str:
     kl_message   = payload.get("kl_message")
     tekufa_msg   = payload.get("tekufa_msg")
     upcoming     = payload.get("upcoming", [])
+    history_text = payload.get("history_text", "אין היסטוריה.")
 
     # עיצוב אירועים קרובים
     upcoming_str = ""
@@ -458,10 +561,10 @@ def generate_message(payload: dict) -> str:
 אל תשלב אותיות ערביות, לטיניות או כל שפה אחרת בתוך מילים עבריות.
 
 לפני שתכתוב – חפש באינטרנט אירועים אסטרונומיים מעניינים לתאריך {date_str}:
-  • כוכבי שביט הנראים כרגע (comets visible tonight)
+  • כוכבי שביט הנראים כרגע
   • ליקויי ירח/שמש בימים הקרובים
   • גשמי מטאורים פעילים כעת
-  • שיגורי Starlink הנראים מהמזרח התיכון
+  • שיגורי Starlink הנראים מישראל – עם שעה מדויקת וכיוון בשמיים
   • אירועים אסטרונומיים בולטים השבוע
 
 ═══════════════════════════════
@@ -500,28 +603,43 @@ def generate_message(payload: dict) -> str:
 📜 היום לפני X שנים:
 {historical or "אין אירוע מיוחד ביומן"}
 
+🗂 היסטוריית הודעות אחרונות (7 ימים אחרונים):
+{history_text}
+
 ═══════════════════════════════
-הוראות כתיבה:
+כללי כתיבה – חובה לקיים את כולם:
 ═══════════════════════════════
-1. כותרת קצרה + תאריך בפתיחה
-2. עננות – התייחסות לפי הסטטוס:
-   • עד {CLOUD_CLEAR}%     → לילה מושלם! שבח את השמיים
-   • {CLOUD_CLEAR}–{CLOUD_HOPEFUL}%  → "יש סיכוי לחלונות פתוחים"
-   • {CLOUD_HOPEFUL}–{CLOUD_POOR}%  → "בתקווה שהענן ייפתח..."
-   • מעל {CLOUD_POOR}%    → אל תדכא – ספר מה מחכה בימים הקרובים
-3. ISS – ציין רק אם עננות מאפשרת (מתחת ל-{CLOUD_POOR}%)
-4. קידוש לבנה – ציין בנפרד לאשכנזים ולספרדים; אם יש אזהרת שבת – הדגש!
-5. תקופות – הסבר בעברית פשוטה מה משמעות ההיפוך/השוויון,
-   כולל ההיבט ההלכתי בקצרה
-6. "הכנת קרקע" – אם יש אירוע מעניין בימים הקרובים
-   (גשם מטאורים, ליקוי, תקופה, סגירת חלון לבנה) – זרוק עליו מילה:
-   "ביום חמישי מגיע שיא... כדאי לסמן ביומן!"
-7. אירוע היסטורי – "עובדת יום" מרתקת
-8. אירועים שוטפים (מהחיפוש) – שלב בטבעיות;
-   אם אינם נראים מישראל – ציין זאת בבירור
-9. סיים בברכה קצרה או עובדה קוסמית מפתיעה
-10. אורך: 250–400 מילה (קצת יותר בגלל התוכן העשיר)
-11. עברית בלבד – ללא ערבוב שפות
+
+עיצוב:
+• ההודעה מתחילה ישירות בתוכן – ללא כל הקדמה, כותרת מסבירה או משפט כמו "הנה ההודעה..."
+• תאריך לועזי תמיד במספרים (17.3, לא י״ז במרץ)
+• בWhatsApp: *כוכבית אחת* = בולד. אל תשתמש ב-**כוכביות כפולות**
+• אין לפתוח בשורה ריקה
+
+שפה:
+• עברית בלבד – ללא ערבוב שפות
+• "בעין בלתי מזוינת" – הביטוי המותר. אסור: "בראייה ערומה", "בעין רגילה"
+
+תוכן:
+• עננות – התייחס לפי הסטטוס:
+  עד {CLOUD_CLEAR}%    → לילה מושלם
+  {CLOUD_CLEAR}–{CLOUD_HOPEFUL}%  → "יש סיכוי לחלונות פתוחים"
+  {CLOUD_HOPEFUL}–{CLOUD_POOR}%  → "בתקווה שהענן ייפתח..."
+  מעל {CLOUD_POOR}%   → אל תדכא – ספר מה מחכה בימים הקרובים
+• ISS – ציין רק אם עננות מאפשרת (מתחת ל-{CLOUD_POOR}%)
+• סטארלינק – ציין אך ורק אם יש נראות מחושבת מישראל עם שעה מדויקת וכיוון בשמיים. שיגור בלבד ללא נראות מישראל – אל תזכיר
+• אירועים שאינם נראים מישראל – ציין זאת בבירור
+• קידוש לבנה – רק אם רלוונטי לתאריך (אל תציין בסוף החודש)
+• "הכנת קרקע" – אם יש אירוע מעניין בימים הקרובים, זרוק עליו מילה היום
+
+היסטוריה:
+• אם נושא הוזכר אתמול בפירוט – היום מספיק משפט אחד: "כזכור, שביט MAPS צפוי ל..."
+• אם נושא הוזכר לפני יומיים-שלושה – אפשר להזכיר בקצרה
+• אם נושא לא הוזכר כלל – הצג אותו במלואו
+• אל תחזור על אותו תוכן מילה במילה יום אחרי יום
+• מקסימום 150 מילה
+• כל משפט חייב להרוויח את מקומו
+• הקורא שלא קרא – צריך להתחרט. לא מאמר, לא דוח – הודעה חדה וקולעת
 """
 
     headers = {
@@ -622,6 +740,11 @@ def main():
             time.sleep(wait_sec)
 
     # ── איסוף נתונים ────────────────────
+    print("📚 טוען היסטוריית הודעות...")
+    history     = load_history()
+    today_key   = now.strftime("%Y-%m-%d")
+    history_text = format_history_for_prompt(history)
+
     print("📡 מושך נתוני עננות...")
     cloud_pct           = get_cloud_cover()
     cloud_status, cloud_desc = cloud_label(cloud_pct)
@@ -665,6 +788,7 @@ def main():
         "tekufa_msg":    tekufa_msg,
         "upcoming":      upcoming,
         "historical":    historical,
+        "history_text":  history_text,
     }
     message = generate_message(payload)
 
@@ -675,6 +799,12 @@ def main():
     # ── שליחה ───────────────────────────
     print("📱 שולח WhatsApp...")
     send_whatsapp(message)
+
+    # ── שמירת היסטוריה ──────────────────
+    print("📚 מסכם ושומר היסטוריה...")
+    summary = extract_summary_from_message(message, payload)
+    save_history(history, today_key, summary)
+    print(f"✅ נשמר: {summary}")
     print("✅ הכל הושלם!")
 
 

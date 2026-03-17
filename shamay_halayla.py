@@ -129,7 +129,7 @@ def get_jewish_date_info() -> dict:
         "day":                   hd,
         "month":                 hm,
         "year":                  hy,
-        "is_rosh_chodesh":       hd in [1, 2, 30],
+        "is_rosh_chodesh":       hd in [1, 30],
         "is_kiddush_levana":     3 <= hd <= 14,
         "is_last_kiddush_levana": hd == 14,
         "is_erev_rosh_chodesh":  hd == 29,  # אפשר להזכיר ערב ר"ח

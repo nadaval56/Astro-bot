@@ -28,6 +28,8 @@ jobs:
   send-astronomy-update:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write   # נדרש לשמירת message_history.json
 
     steps:
       - name: ⬇️ Checkout
@@ -50,6 +52,15 @@ jobs:
           WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}
           TEST_MODE:           ${{ github.event.inputs.test_mode }}
         run: python shamay_halayla.py
+
+      - name: 💾 שמירת היסטוריית הודעות
+        if: always()
+        run: |
+          git config user.name  "Astro Bot"
+          git config user.email "astro-bot@shamay-halayla"
+          git add message_history.json
+          git diff --staged --quiet || git commit -m "📚 history: $(date '+%Y-%m-%d')"
+          git push
 
       - name: 📊 שמירת לוג
         if: always()

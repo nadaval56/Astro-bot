@@ -189,66 +189,68 @@ def get_kiddush_levana_info() -> dict:
 
 def format_kiddush_levana_message(info: dict) -> Optional[str]:
     """
-    לוגיקת תצוגה לפי שלב בחודש:
-    א'         – שתיקה
-    ב'         – "בקרוב" עם תאריכי פתיחה
-    ג'–ו'      – אשכנזים פתוחים, ספרדים עדיין לא (שתי שורות)
-    ז'–ט'      – שניהם פתוחים (שורה אחת)
-    י'–י"א     – שתיקה
-    י"ב–י"ג   – תזכורת סגירה
-    י"ד        – הלילה האחרון
-    אחרי סגירה – שתיקה
-    שבת בסגירה – אזהרה מוקדמת
+    לוגיקת תצוגה מבוססת datetime בלבד – ללא hday.
+
+    שתיקה:  לפני 24 שעות מפתיחת אשכנזים | אחרי הסגירה
+    בקרוב:  24–0 שעות לפני פתיחת אשכנזים
+    ג'–ו':   אשכנזים פתוחים, ספרדים לא
+    ז'–ט':   שניהם פתוחים, נותרו 3+ ימים
+    י'–י"א:  שתיקה (נותרו 2–4 ימים – לא מציגים)
+    י"ב–י"ג: תזכורת סגירה (נותרו 1–2 ימים)
+    י"ד:     הלילה האחרון (נותר פחות מיום)
     """
     if "error" in info:
         return None
 
-    now  = datetime.now(ISRAEL_TZ)
-    hday = info.get("hebrew_day", 0)
+    now     = datetime.now(ISRAEL_TZ)
+    ash     = info["ashkenaz_open"]
+    sep     = info["sephardic_open"]
+    close   = info["window_close"]
+    last    = info["last_night"]
+    shabbat = info["shabbat_warning"]
 
-    ash_open  = info["ashkenaz_open"]
-    sep_open  = info["sephardic_open"]
-    close     = info["window_close"]
-    last      = info["last_night"]
-    shabbat   = info["shabbat_warning"]
-
-    # שתיקה מוחלטת לפני ב', אחרי הסגירה, או לפני שהחלון בכלל נפתח
-    if hday < 2 or now > close or now < ash_open - timedelta(hours=24):
+    # שתיקה: לפני החלון או אחריו
+    if now > close:
+        return None
+    if now < ash - timedelta(hours=24):
         return None
 
-    ash_open_str  = ash_open.strftime("%d/%m בשעה %H:%M")
-    sep_open_str  = sep_open.strftime("%d/%m בשעה %H:%M")
-    close_str     = close.strftime("%d/%m בשעה %H:%M")
-    last_str      = last.strftime("%d/%m") if hasattr(last, "strftime") else ""
+    close_str = close.strftime("%d/%m בשעה %H:%M")
+    last_str  = last.strftime("%d/%m") if hasattr(last, "strftime") else ""
+    sep_str   = sep.strftime("%d/%m בשעה %H:%M")
+    ash_str   = ash.strftime("%d/%m בשעה %H:%M")
+    hours_to_close = (close - now).total_seconds() / 3600
 
-    # ── ב' – טרם נפתח לאף אחד ──
-    if hday == 2 and now < ash_open:
+    # ── בקרוב (24 שעות לפני פתיחת אשכנזים) ──
+    if now < ash:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-            f"   בקרוב – קידוש לבנה (אשכנזים): החל מ-{ash_open_str}\n"
-            f"   בקרוב – ברכת הלבנה (ספרדים): החל מ-{sep_open_str}"
+            f"   בקרוב – קידוש לבנה (אשכנזים): החל מ-{ash_str}\n"
+            f"   בקרוב – ברכת הלבנה (ספרדים): החל מ-{sep_str}"
         )
 
-    # ── ג'–ו' – אשכנזים פתוחים, ספרדים לא (שתי שורות) ──
-    if info["is_open_ashkenaz"] and not info["is_open_sephardic"]:
+    # ── אשכנזים פתוחים, ספרדים עדיין לא (שתי שורות) ──
+    if now < sep:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
             f"   ✅ קידוש לבנה (אשכנזים): אפשר לברך הלילה\n"
-            f"   ⏳ ברכת הלבנה (ספרדים): החל מ-{sep_open_str}"
+            f"   ⏳ ברכת הלבנה (ספרדים): החל מ-{sep_str}"
         )
 
-    # ── ז'–ט' – שניהם פתוחים, רחוק מסגירה ──
-    if info["is_open_ashkenaz"] and info["is_open_sephardic"] and hday <= 11:
-        if 7 <= hday <= 9:
-            return (
-                f"🌙 ✅ אפשר לומר הלילה *קידוש לבנה* (אשכנזים) "
-                f"ו*ברכת הלבנה* (ספרדים)"
-            )
-        # י'–י"א – שתיקה
+    # שניהם פתוחים – בחר תצוגה לפי כמה זמן נותר
+    # ── נותרו 3+ ימים (ז'–ט' בערך) – הזכרה חיובית ──
+    if hours_to_close >= 72:
+        return (
+            f"🌙 ✅ אפשר לומר הלילה "
+            f"*קידוש לבנה* (אשכנזים) ו*ברכת הלבנה* (ספרדים)"
+        )
+
+    # ── נותרו 48–72 שעות (י' בערך) – שתיקה ──
+    if hours_to_close >= 48:
         return None
 
-    # ── י"ב–י"ג – תזכורת סגירה ──
-    if hday in (12, 13):
+    # ── נותרו 24–48 שעות (י"ב–י"ג) – תזכורת ──
+    if hours_to_close >= 24:
         if shabbat:
             return (
                 f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
@@ -260,20 +262,17 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
             f"   ⚠️ שים לב! סוף זמן ברכה: {close_str}"
         )
 
-    # ── י"ד – הלילה האחרון ──
-    if hday >= 14:
-        if shabbat and now.date() >= last.date():
-            return (
-                f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-                f"   ⚠️ הלילה האחרון לברכה!\n"
-                f"   שים לב: מכיוון שהסגירה חלה בשבת, חלון הזמן מתקצר"
-            )
+    # ── נותרו פחות מ-24 שעות (י"ד) – הלילה האחרון ──
+    if shabbat:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-            f"   ⚠️ הלילה האחרון! עד {close_str}"
+            f"   ⚠️ הלילה האחרון! עד {close_str}\n"
+            f"   שים לב: מכיוון שהסגירה חלה בשבת, חלון הזמן מתקצר"
         )
-
-    return None
+    return (
+        f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
+        f"   ⚠️ הלילה האחרון! עד {close_str}"
+    )
 
 
 # ══════════════════════════════════════════

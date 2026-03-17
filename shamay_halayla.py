@@ -547,7 +547,7 @@ def generate_message(payload: dict) -> str:
 
     for attempt in range(5):
         r = requests.post(CLAUDE_API, headers=headers,
-                          json={**body, "messages": messages}, timeout=60)
+                          json={**body, "messages": messages}, timeout=120)
         r.raise_for_status()
         resp = r.json()
 

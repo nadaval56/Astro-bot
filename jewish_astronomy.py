@@ -97,9 +97,13 @@ def get_kiddush_levana_info() -> dict:
                 try:
                     dt  = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
                     age = (now - dt).total_seconds() / 86400
+                    print(f"🔍 מולד נמצא: {item.get('title')} | {dt.strftime('%d/%m/%Y %H:%M')} | גיל: {round(age,2)} ימים")
                     if -1 <= age <= LUNAR_CYCLE_DAYS:
-                        molad = dt
-                        break
+                        # בדוק שחלון הזמן עוד לא נסגר
+                        candidate_close = dt + WINDOW_CLOSE_OFFSET
+                        if candidate_close > now:
+                            molad = dt
+                            break
                 except Exception:
                     pass
         if molad:

@@ -117,20 +117,18 @@ def get_jewish_date_info() -> dict:
     now   = datetime.now(ISRAEL_TZ)
     today = now.date()
 
-    # שלוף שעת שקיעה מ-Hebcal
+    # חישוב שקיעה ישיר עם ephem – עובד כל יום, לא רק ערב שבת
     sunset_dt = None
     try:
-        shabbat_url = (
-            f"https://www.hebcal.com/shabbat?cfg=json"
-            f"&geonameid={GEONAMEID}&M=on&b=18"
-            f"&date={today.isoformat()}"
-        )
-        items = requests.get(shabbat_url, timeout=10).json().get("items", [])
-        for item in items:
-            if item.get("category") == "candles":
-                candle_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                sunset_dt = candle_dt + timedelta(minutes=18)
-                break
+        import ephem
+        obs         = ephem.Observer()
+        obs.lat     = str(LAT)
+        obs.lon     = str(LON)
+        obs.elev    = ALT
+        obs.date    = now.astimezone(pytz.utc)
+        sun         = ephem.Sun()
+        sunset_utc  = obs.next_setting(sun).datetime().replace(tzinfo=pytz.utc)
+        sunset_dt   = sunset_utc.astimezone(ISRAEL_TZ)
     except Exception:
         pass
 

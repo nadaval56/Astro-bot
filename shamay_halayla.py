@@ -121,14 +121,15 @@ def get_jewish_date_info() -> dict:
     sunset_dt = None
     try:
         import ephem
-        obs         = ephem.Observer()
-        obs.lat     = str(LAT)
-        obs.lon     = str(LON)
-        obs.elev    = ALT
-        obs.date    = now.astimezone(pytz.utc)
-        sun         = ephem.Sun()
-        sunset_utc  = obs.next_setting(sun).datetime().replace(tzinfo=pytz.utc)
-        sunset_dt   = sunset_utc.astimezone(ISRAEL_TZ)
+        obs        = ephem.Observer()
+        obs.lat    = str(LAT)
+        obs.lon    = str(LON)
+        obs.elev   = ALT
+        obs.date   = now.astimezone(pytz.utc)
+        sun        = ephem.Sun()
+        # previous_setting = שקיעה של היום (גם אם כבר עברה)
+        sunset_utc = obs.previous_setting(sun).datetime().replace(tzinfo=pytz.utc)
+        sunset_dt  = sunset_utc.astimezone(ISRAEL_TZ)
     except Exception:
         pass
 

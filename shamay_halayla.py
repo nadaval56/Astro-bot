@@ -999,6 +999,7 @@ def main():
 
     print("✡️ שולף לוח שנה יהודי...")
     jdate    = get_jewish_date_info()
+    print(f"🗓️ תאריך עברי: {jdate['hebrew_display']} | after_sunset: {jdate['after_sunset']}")
     j_events = get_jewish_events_today()
 
     print("🌙 מחשב קידוש לבנה / ברכת הלבנה...")

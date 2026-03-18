@@ -110,29 +110,54 @@ def get_shabbat_info() -> dict:
 
 def get_jewish_date_info() -> dict:
     """
-    ממיר תאריך לועזי לעברי ומחזיר:
-      יום בחודש, שם החודש, שנה עברית
-    מחשב גם:
-      - האם בחלון קידוש לבנה (ג'–י"ד בחודש)
-      - האם הלילה האחרון לקידוש לבנה (י"ד)
-      - ראש חודש (א'–ב' / ל')
+    ממיר תאריך לועזי לעברי.
+    חשוב: אחרי צאת הכוכבים (~40 דקות אחרי שקיעה) כבר מתחיל
+    היום העברי הבא – לכן משתמשים בתאריך מחר אם עבר הזמן.
     """
-    today = datetime.now(ISRAEL_TZ).date()
-    url   = f"https://www.hebcal.com/converter?cfg=json&date={today.isoformat()}&g2h=1"
-    data  = requests.get(url, timeout=10).json()
+    now   = datetime.now(ISRAEL_TZ)
+    today = now.date()
+
+    # שלוף שעת שקיעה מ-Hebcal
+    sunset_dt = None
+    try:
+        shabbat_url = (
+            f"https://www.hebcal.com/shabbat?cfg=json"
+            f"&geonameid={GEONAMEID}&M=on&b=18"
+            f"&date={today.isoformat()}"
+        )
+        items = requests.get(shabbat_url, timeout=10).json().get("items", [])
+        for item in items:
+            if item.get("category") == "candles":
+                candle_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                sunset_dt = candle_dt + timedelta(minutes=18)  # שקיעה אמיתית
+                break
+    except Exception:
+        pass
+
+    # אחרי צאת הכוכבים (שקיעה + 40 דקות) = כבר יום עברי הבא
+    if sunset_dt and now >= sunset_dt + timedelta(minutes=40):
+        hebrew_date = today + timedelta(days=1)
+        after_sunset = True
+    else:
+        hebrew_date = today
+        after_sunset = False
+
+    url  = f"https://www.hebcal.com/converter?cfg=json&date={hebrew_date.isoformat()}&g2h=1"
+    data = requests.get(url, timeout=10).json()
 
     hd = data.get("hd", 0)
     hm = data.get("hm", "")
     hy = data.get("hy", 0)
 
     return {
-        "day":                   hd,
-        "month":                 hm,
-        "year":                  hy,
-        "is_rosh_chodesh":       hd in [1, 30],
-        "is_kiddush_levana":     3 <= hd <= 14,
+        "day":                    hd,
+        "month":                  hm,
+        "year":                   hy,
+        "after_sunset":           after_sunset,
+        "is_rosh_chodesh":        hd in [1, 30],
+        "is_kiddush_levana":      3 <= hd <= 14,
         "is_last_kiddush_levana": hd == 14,
-        "is_erev_rosh_chodesh":  hd == 29,  # אפשר להזכיר ערב ר"ח
+        "is_erev_rosh_chodesh":   hd == 29,
     }
 
 
@@ -987,7 +1012,9 @@ def main():
     upcoming    = get_upcoming_jewish_highlights(days_ahead=7)
 
     historical = get_historical_event()
-    date_str   = now.strftime("%d/%m/%Y")
+    # אחרי שקיעה – התאריך הלועזי המוצג הוא של מחר (כי ההודעה רלוונטית ללילה)
+    display_date = now + timedelta(days=1) if jdate.get("after_sunset") else now
+    date_str     = display_date.strftime("%d/%m/%Y")
 
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")

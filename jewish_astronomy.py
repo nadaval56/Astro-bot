@@ -31,7 +31,11 @@ def _hebcal_items(year: int, month: int) -> list[dict]:
         f"&year={year}&month={month}"
         f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
     )
-    return requests.get(url, timeout=10).json().get("items", [])
+    try:
+        return requests.get(url, timeout=10).json().get("items", [])
+    except Exception as e:
+        print(f"⚠️ Hebcal timeout/error: {e}")
+        return []
 
 
 def _get_special_date(items: list[dict], search_title: str) -> Optional[date]:
@@ -83,7 +87,10 @@ def get_kiddush_levana_info() -> dict:
     today = now.date()
 
     conv_url = f"https://www.hebcal.com/converter?cfg=json&date={today.isoformat()}&g2h=1"
-    conv     = requests.get(conv_url, timeout=10).json()
+    try:
+        conv = requests.get(conv_url, timeout=10).json()
+    except Exception:
+        conv = {}
     hmonth   = conv.get("hm", "")
     hday     = conv.get("hd", 0)
 
@@ -131,7 +138,6 @@ def get_kiddush_levana_info() -> dict:
 
                     dt  = molad_dt
                     age = (now - dt).total_seconds() / 86400
-                    print(f"🔍 מולד: {title[:40]} | {dt.strftime('%d/%m/%Y %H:%M')} | גיל: {round(age,2)} ימים")
                     if -1 <= age <= LUNAR_CYCLE_DAYS:
                         candidate_close = dt + WINDOW_CLOSE_OFFSET
                         if candidate_close > now:

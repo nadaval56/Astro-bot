@@ -830,13 +830,23 @@ def generate_message(payload: dict) -> str:
 
     messages = [initial_message]
 
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers=headers,
-        json={**body, "messages": messages},
-        timeout=60
-    )
-    r.raise_for_status()
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json={**body, "messages": messages},
+                timeout=60
+            )
+            r.raise_for_status()
+            break
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                wait = (attempt + 1) * 10
+                print(f"⏳ 429 – ממתין {wait} שניות...")
+                time.sleep(wait)
+            else:
+                raise
     resp = r.json()
 
     usage = resp.get("usage", {})
@@ -951,6 +961,9 @@ def main():
             jewish_context_parts.append(f"בעוד {ev['days_away']} ימים: {ev['title']}")
     jewish_context = "\n".join(jewish_context_parts)
     space_news = gather_space_news(date_str, jewish_context)
+
+    # המתנה קצרה למניעת 429 בין קריאות API
+    time.sleep(5)
 
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")

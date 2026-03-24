@@ -597,7 +597,7 @@ def proofread_hebrew(message: str) -> str:
         return message
 
 
-def gather_space_news(date_str: str) -> str:
+def gather_space_news(date_str: str, jewish_context: str = "") -> str:
     """
     קריאה 1 – "עיתונאי חלל":
     תפקיד אחד בלבד: חפש ובחר מה מעניין הלילה.
@@ -608,12 +608,18 @@ def gather_space_news(date_str: str) -> str:
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
     }
+
+    jewish_section = f"""
+אירועים יהודיים-אסטרונומיים ידועים הלילה (כבר מחושבים, אין צורך לחפש):
+{jewish_context}
+""" if jewish_context else ""
+
     body = {
         "model":      CLAUDE_MODEL,
         "max_tokens": 800,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "messages": [{"role": "user", "content": f"""אתה עיתונאי חלל. המשימה שלך היא לחפש ולסנן בלבד – לא לכתוב הודעה.
-
+{jewish_section}
 חפש באינטרנט לתאריך {date_str}:
 1. חדשות חלל בולטות השבוע – תגליות ג'יימס וב/האבל, שיגורים מיוחדים, גילויים חדשים
 2. אירועים אסטרונומיים – שביטים נראים, ליקויים, מטר מטאורים פעיל, Starlink מישראל
@@ -932,7 +938,19 @@ def main():
     date_str   = now.strftime("%d/%m/%Y")
 
     print("📡 מחפש חדשות חלל ואסטרונומיה...")
-    space_news = gather_space_news(date_str)
+    # בונה הקשר יהודי-אסטרונומי לקריאת החיפוש
+    jewish_context_parts = []
+    if kl_message:
+        jewish_context_parts.append(kl_message)
+    if tekufa_msg:
+        jewish_context_parts.append(tekufa_msg)
+    if j_events:
+        jewish_context_parts.extend(j_events)
+    if upcoming:
+        for ev in upcoming[:3]:
+            jewish_context_parts.append(f"בעוד {ev['days_away']} ימים: {ev['title']}")
+    jewish_context = "\n".join(jewish_context_parts)
+    space_news = gather_space_news(date_str, jewish_context)
 
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")

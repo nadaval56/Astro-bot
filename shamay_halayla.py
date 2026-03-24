@@ -555,6 +555,48 @@ def get_historical_event() -> str | None:
 # 6. יצירת ההודעה עם Claude Sonnet
 # ══════════════════════════════════════════
 
+def proofread_hebrew(message: str) -> str:
+    """
+    הגהה לשונית של ההודעה – קריאה קצרה לקלוד.
+    מתקנת: זכר/נקבה, הטיות, ביטויים לא עבריים, מבנה משפט.
+    לא משנה תוכן, לא מקצרת, לא מוסיפה.
+    """
+    headers = {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+    }
+    body = {
+        "model":      CLAUDE_MODEL,
+        "max_tokens": 1500,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "אתה מגיה עברית מקצועי. תפקידך לתקן שגיאות לשון בלבד.\n"
+                "חובה לשמור על:\n"
+                "• כל התוכן, המידע והעובדות – ללא שינוי\n"
+                "• כל האימוג'י\n"
+                "• כל עיצוב הטקסט (*בולד*, שורות ריקות)\n"
+                "• אורך ההודעה – אל תקצר ואל תוסיף\n\n"
+                "תקן רק:\n"
+                "• זכר/נקבה שגוי\n"
+                "• הטיות שגויות של פעלים ושמות\n"
+                "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
+                "• מבנה משפט מסורבל\n\n"
+                "החזר את ההודעה המתוקנת בלבד, ללא הסברים.\n\n"
+                f"ההודעה:\n{message}"
+            )
+        }]
+    }
+    try:
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r.raise_for_status()
+        return r.json()["content"][0]["text"].strip()
+    except Exception as e:
+        print(f"⚠️ הגהה נכשלה: {e} – שולח הודעה מקורית")
+        return message
+
+
 def generate_message(payload: dict) -> str:
     """
     שולח את כל הנתונים ל-Claude עם כלי web_search ו-Prompt Caching.
@@ -1043,6 +1085,9 @@ def main():
         "history_text":  history_text,
     }
     message = generate_message(payload)
+
+    print("✍️ מגיה עברית...")
+    message = proofread_hebrew(message)
 
     print("\n" + "═"*50)
     print(message)

@@ -634,15 +634,26 @@ def gather_space_news(date_str: str, jewish_context: str = "") -> str:
 ללא עיצוב, ללא סגנון, ללא המלצות. רק עובדות."""}]
     }
 
+    # המתנה קצרה כדי לא להתנגש עם קריאות קודמות
+    time.sleep(3)
     messages = [body["messages"][0].copy()]
     for attempt in range(5):
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json={**body, "messages": messages},
-            timeout=90
-        )
-        r.raise_for_status()
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json={**body, "messages": messages},
+                timeout=90
+            )
+            r.raise_for_status()
+        except Exception as e:
+            if "429" in str(e) and attempt < 4:
+                wait = (attempt + 1) * 15
+                print(f"⏳ 429 – ממתין {wait} שניות...")
+                time.sleep(wait)
+                continue
+            print(f"⚠️ שגיאה ב-gather_space_news: {e}")
+            return "אין חדשות חלל זמינות"
         resp = r.json()
 
         text_blocks = [

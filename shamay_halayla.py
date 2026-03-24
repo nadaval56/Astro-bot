@@ -980,9 +980,8 @@ def main():
     jewish_context = "\n".join(jewish_context_parts)
     space_news = gather_space_news(date_str, jewish_context)
 
-    # המתנה בין gather ל-generate למניעת rate limit
-    print("⏱️ ממתין 30 שניות לפני כתיבת ההודעה...")
-    time.sleep(30)
+    # המתנה קצרה בלבד – retry יטפל ב-429 אם יגיע
+    time.sleep(5)
 
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")

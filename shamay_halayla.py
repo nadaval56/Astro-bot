@@ -648,9 +648,13 @@ def gather_space_news(date_str: str, jewish_context: str = "") -> str:
             r.raise_for_status()
         except Exception as e:
             if "429" in str(e) and attempt < 4:
-                wait = (attempt + 1) * 15
-                print(f"⏳ 429 – ממתין {wait} שניות...")
-                time.sleep(wait)
+                # נסה לקרוא את retry-after מה-header
+                try:
+                    retry_after = int(e.response.headers.get("retry-after", 30))
+                except Exception:
+                    retry_after = 30 * (attempt + 1)
+                print(f"⏳ 429 – ממתין {retry_after} שניות...")
+                time.sleep(retry_after)
                 continue
             print(f"⚠️ שגיאה ב-gather_space_news: {e}")
             return "אין חדשות חלל זמינות"
@@ -853,9 +857,12 @@ def generate_message(payload: dict) -> str:
             break
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                wait = (attempt + 1) * 10
-                print(f"⏳ 429 – ממתין {wait} שניות...")
-                time.sleep(wait)
+                try:
+                    retry_after = int(e.response.headers.get("retry-after", 30))
+                except Exception:
+                    retry_after = 30 * (attempt + 1)
+                print(f"⏳ 429 – ממתין {retry_after} שניות...")
+                time.sleep(retry_after)
             else:
                 raise
     resp = r.json()
@@ -973,8 +980,9 @@ def main():
     jewish_context = "\n".join(jewish_context_parts)
     space_news = gather_space_news(date_str, jewish_context)
 
-    # המתנה קצרה למניעת 429 בין קריאות API
-    time.sleep(5)
+    # המתנה בין gather ל-generate למניעת rate limit
+    print("⏱️ ממתין 30 שניות לפני כתיבת ההודעה...")
+    time.sleep(30)
 
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")

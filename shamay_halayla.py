@@ -97,7 +97,11 @@ def get_shabbat_info() -> dict:
         if cat == "candles":
             dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
             if dt.date() == today:
-                result["is_erev"] = True
+                # ערב שבת/חג רק אם ההדלקה בעוד פחות מ-4 שעות
+                # (כך הרצה בחצות הלילה לא תחשב "ערב חג" של שקיעה שעוד 18 שעות)
+                hours_until_candles = (dt - datetime.now(ISRAEL_TZ)).total_seconds() / 3600
+                if 0 <= hours_until_candles <= 4:
+                    result["is_erev"] = True
 
         if cat == "havdalah":
             dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
@@ -1068,30 +1072,94 @@ def send_whatsapp(message: str):
 # 8. נקודת כניסה ראשית
 # ══════════════════════════════════════════
 
+def is_shabbat_or_yomtov_now() -> bool:
+    """
+    בודק האם עכשיו שבת או יום טוב (ממש – בין הדלקת נרות להבדלה).
+    משתמש בהבדלה של אתמול אם צריך.
+    """
+    now   = datetime.now(ISRAEL_TZ)
+    today = now.date()
+
+    # בדוק אם יש הדלקת נרות שעברה היום (= נכנסנו לשבת/חג)
+    # ואם אין הבדלה שעברה (= עדיין בשבת/חג)
+    for day_offset in [0, -1]:
+        check = today + timedelta(days=day_offset)
+        url = (
+            f"https://www.hebcal.com/shabbat?cfg=json"
+            f"&geonameid={GEONAMEID}&m=50&lg=s"
+            f"&yt=G&date={check.isoformat()}"
+        )
+        try:
+            items = requests.get(url, timeout=10).json().get("items", [])
+        except Exception:
+            return False
+
+        candles_dt  = None
+        havdalah_dt = None
+
+        for item in items:
+            cat = item.get("category", "")
+            if cat == "candles":
+                try:
+                    candles_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                except Exception:
+                    pass
+            if cat == "havdalah":
+                try:
+                    havdalah_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                except Exception:
+                    pass
+
+        if candles_dt and candles_dt <= now:
+            # הדלקת נרות עברה
+            if havdalah_dt is None or havdalah_dt > now:
+                # עדיין לא הבדלה = עכשיו שבת/חג
+                return True
+
+    return False
+
+
+def was_sent_today(history: dict) -> bool:
+    """בודק אם כבר נשלחה הודעה היום"""
+    today_key = datetime.now(ISRAEL_TZ).strftime("%Y-%m-%d")
+    return today_key in history
+
+
 def main():
     now = datetime.now(ISRAEL_TZ)
     print(f"\n🔭 שמי הלילה מתחיל | {now.strftime('%A %d/%m/%Y %H:%M')}\n")
 
-    # ── בדיקת שבת / חג ──────────────────
-    shabbat = get_shabbat_info()
+    hour = now.hour  # שעה מקומית ישראל
+    history = load_history()
 
-    if shabbat["is_erev"]:
-        label = f"חג {shabbat['holiday']}" if shabbat["holiday"] else "שבת"
-        print(f"🕯️ ערב {label} – לא שולח הודעה")
-        sys.exit(0)
+    # ══════════════════════════════════════════
+    # לוגיקת שליחה לפי שעת הריצה
+    # ══════════════════════════════════════════
 
-    if shabbat["is_motzei"] and shabbat["havdalah_time"]:
-        send_time = shabbat["havdalah_time"] + timedelta(minutes=30)
-        wait_sec  = (send_time - now).total_seconds()
-        if wait_sec > 0:
-            label = f"חג {shabbat['holiday']}" if shabbat["holiday"] else "שבת"
-            print(f"✡️ מוצאי {label} – ממתין עד {send_time.strftime('%H:%M')} "
-                  f"({round(wait_sec/60)} דקות)")
-            time.sleep(wait_sec)
+    if hour < 17:
+        # ── ריצת 13:00 ──
+        # שלח אם לא שבת/חג עכשיו
+        # (הדלקת נרות בישראל לא יכולה להיות לפני ~15:30)
+        if is_shabbat_or_yomtov_now():
+            print("✡️ עכשיו שבת/חג – לא שולח")
+            sys.exit(0)
+
+    else:
+        # ── ריצת 21:00 ──
+        # שלח אם: לא נשלח היום, ולא שבת/חג עכשיו
+
+        if was_sent_today(history):
+            print("✅ כבר נשלחה הודעה היום – לא שולח שוב")
+            sys.exit(0)
+
+        if is_shabbat_or_yomtov_now():
+            print("✡️ עכשיו שבת/חג – לא שולח")
+            sys.exit(0)
+
+        print("🌙 ריצת לילה – שולח הודעה")
 
     # ── איסוף נתונים ────────────────────
     print("📚 טוען היסטוריית הודעות...")
-    history     = load_history()
     today_key   = now.strftime("%Y-%m-%d")
     history_text = format_history_for_prompt(history)
 

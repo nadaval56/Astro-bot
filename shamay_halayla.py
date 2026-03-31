@@ -137,9 +137,16 @@ def get_jewish_date_info() -> dict:
     except Exception:
         pass
 
-    # אחרי צאת הכוכבים = יום עברי חדש
+    # אחרי צאת הכוכבים = יום עברי חדש.
+    # אבל: בריצת 13:00 (לפני שקיעה) אנחנו מוסיפים יום כי ההודעה ללילה הקרוב.
+    # בריצת 21:00 (אחרי שקיעה) – today כבר נותן את התאריך הנכון לאותו לילה.
     after_sunset = bool(sunset_dt and now >= sunset_dt + timedelta(minutes=40))
-    hebrew_date  = today + timedelta(days=1) if after_sunset else today
+    if now.hour >= 17:
+        # ריצת לילה – already past sunset, today IS the correct Hebrew date
+        hebrew_date = today
+    else:
+        # ריצת יום – ההודעה ללילה הקרוב
+        hebrew_date = today + timedelta(days=1) if after_sunset else today
 
     url  = f"https://www.hebcal.com/converter?cfg=json&date={hebrew_date.isoformat()}&g2h=1"
     try:

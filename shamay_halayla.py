@@ -273,53 +273,168 @@ def cloud_label(pct: int) -> tuple[str, str]:
 # 3. ISS – מעברים (Skyfield + Celestrak TLE)
 # ══════════════════════════════════════════
 
-def get_iss_passes() -> list[str]:
-    """מחשב מעברי ISS מעל ישראל הערב (20:00–23:59)"""
-    try:
-        from skyfield.api import load, EarthSatellite, wgs84
-        import pytz as _tz
+def _azimuth_to_hebrew(az: float) -> str:
+    """ממיר אזימוט למעלות לכיוון עברי"""
+    dirs = [
+        (22.5,  "צפון"),
+        (67.5,  "צפון-מזרח"),
+        (112.5, "מזרח"),
+        (157.5, "דרום-מזרח"),
+        (202.5, "דרום"),
+        (247.5, "דרום-מערב"),
+        (292.5, "מערב"),
+        (337.5, "צפון-מערב"),
+        (360.0, "צפון"),
+    ]
+    for limit, name in dirs:
+        if az < limit:
+            return name
+    return "צפון"
 
+
+def _get_satellite_passes(norad_id: int, name: str, ts, obs) -> list[dict]:
+    """מחשב מעברים של לוויין נתון מעל נקודת התצפית"""
+    try:
         tle_resp = requests.get(
-            "https://celestrak.org/satcat/tle.php?CATNR=25544", timeout=10
+            f"https://celestrak.org/satcat/tle.php?CATNR={norad_id}", timeout=10
         )
         lines = [l.strip() for l in tle_resp.text.strip().splitlines() if l.strip()]
         if len(lines) < 2:
-            return ["⚠️ לא ניתן לקבל נתוני ISS"]
-
+            return []
         line1, line2 = lines[-2], lines[-1]
-        ts  = load.timescale()
-        sat = EarthSatellite(line1, line2, "ISS", ts)
-        obs = wgs84.latlon(LAT, LON, elevation_m=ALT)
 
-        now_il  = datetime.now(ISRAEL_TZ)
-        t0 = ts.from_datetime(now_il.replace(hour=20, minute=0, second=0).astimezone(pytz.utc))
+        from skyfield.api import EarthSatellite
+        sat = EarthSatellite(line1, line2, name, ts)
+
+        now_il = datetime.now(ISRAEL_TZ)
+        # חלון: שעה לפני שקיעה עד חצות
+        t0 = ts.from_datetime(now_il.replace(hour=17, minute=0, second=0).astimezone(pytz.utc))
         t1 = ts.from_datetime(now_il.replace(hour=23, minute=59, second=0).astimezone(pytz.utc))
 
-        times, events = sat.find_events(obs, t0, t1, altitude_degrees=15.0)
+        times, events = sat.find_events(obs, t0, t1, altitude_degrees=10.0)
 
         passes, cur = [], {}
         for ti, ev in zip(times, events):
             dt = ti.astimezone(ISRAEL_TZ)
             if ev == 0:
-                cur = {"rise": dt}
+                cur = {"rise_dt": dt, "rise_ti": ti}
             elif ev == 1:
-                cur["peak"] = dt
+                cur["peak_dt"] = dt
+                cur["peak_ti"] = ti
             elif ev == 2:
-                cur["set"] = dt
-                if "rise" in cur:
+                cur["set_dt"] = dt
+                if "rise_dt" in cur:
                     passes.append(cur)
                 cur = {}
 
         result = []
-        for p in passes[:2]:
-            rise = p["rise"].strftime("%H:%M")
-            peak = p.get("peak", p["rise"]).strftime("%H:%M")
-            result.append(f"🛸 ISS מעביר ב-{rise} (שיא ב-{peak})")
-        return result if result else ["אין מעבר בולט של ISS הלילה"]
+        for p in passes:
+            # חשב אזימוט בזמן עלייה וירידה
+            try:
+                diff_rise = (sat - obs).at(p["rise_ti"])
+                alt_r, az_r, _ = diff_rise.altaz()
+                diff_set  = (sat - obs).at(p.get("peak_ti", p["rise_ti"]))
+                alt_p, az_p, _ = diff_set.altaz()
+
+                # כיוון יציאה (שקיעה)
+                if "set_dt" in p:
+                    set_ti = ts.from_datetime(p["set_dt"].astimezone(pytz.utc))
+                    diff_set2 = (sat - obs).at(set_ti)
+                    _, az_set, _ = diff_set2.altaz()
+                    dir_set = _azimuth_to_hebrew(az_set.degrees)
+                else:
+                    dir_set = "?"
+
+                az_rise_deg = az_r.degrees
+                alt_peak    = round(alt_p.degrees)
+                dir_rise    = _azimuth_to_hebrew(az_rise_deg)
+
+                # בהירות לפי גובה שיא
+                if alt_peak >= 60:
+                    brightness = "בהיר מאוד ✨"
+                elif alt_peak >= 35:
+                    brightness = "בהיר"
+                elif alt_peak >= 20:
+                    brightness = "נראה היטב"
+                else:
+                    brightness = "חלש"
+
+            except Exception:
+                dir_rise, dir_set, alt_peak, brightness = "?", "?", "?", ""
+
+            rise_str = p["rise_dt"].strftime("%H:%M")
+            peak_str = p.get("peak_dt", p["rise_dt"]).strftime("%H:%M")
+
+            result.append({
+                "name":       name,
+                "rise_dt":    p["rise_dt"],
+                "rise_str":   rise_str,
+                "peak_str":   peak_str,
+                "dir_rise":   dir_rise,
+                "dir_set":    dir_set,
+                "alt_peak":   alt_peak,
+                "brightness": brightness,
+                "az_rise":    round(az_rise_deg) if dir_rise != "?" else "?",
+            })
+
+        return result
 
     except Exception as e:
-        print(f"⚠️ שגיאת ISS: {e}")
-        return ["לא ניתן לחשב מעברי ISS הלילה"]
+        print(f"⚠️ שגיאת {name}: {e}")
+        return []
+
+
+def get_station_passes() -> list[str]:
+    """
+    מחשב מעברים של ISS וטיאנגונג מעל ישראל הלילה.
+    מזהה מעברים כפולים (שתי תחנות באותו ערב).
+    מחזיר רשימת מחרוזות מעוצבות, או רשימה ריקה אם אין מעברים.
+    """
+    try:
+        from skyfield.api import load, wgs84
+        ts  = load.timescale()
+        obs = wgs84.latlon(LAT, LON, elevation_m=ALT)
+
+        iss_passes  = _get_satellite_passes(25544, "ISS",      ts, obs)
+        css_passes  = _get_satellite_passes(48274, "טיאנגונג", ts, obs)
+
+        result = []
+
+        # זיהוי מעבר כפול – אם שתיהן עוברות בהפרש של פחות מ-10 דקות
+        double_pass = False
+        if iss_passes and css_passes:
+            for ip in iss_passes:
+                for cp in css_passes:
+                    diff = abs((ip["rise_dt"] - cp["rise_dt"]).total_seconds())
+                    if diff < 600:
+                        double_pass = True
+                        result.append(
+                            f"🌟 *מעבר כפול הלילה!* ISS וטיאנגונג בשמיים יחד\n"
+                            f"   🛸 ISS: {ip['rise_str']} מ{ip['dir_rise']} לכיוון {ip['dir_set']} "
+                            f"(שיא {ip['alt_peak']}°, {ip['brightness']})\n"
+                            f"   🛸 טיאנגונג: {cp['rise_str']} מ{cp['dir_rise']} לכיוון {cp['dir_set']} "
+                            f"(שיא {cp['alt_peak']}°, {cp['brightness']})"
+                        )
+
+        if not double_pass:
+            for p in iss_passes[:1]:
+                result.append(
+                    f"🛸 ISS עובר ב-{p['rise_str']} – "
+                    f"מ{p['dir_rise']} לכיוון {p['dir_set']} "
+                    f"(שיא {p['alt_peak']}°, {p['brightness']})"
+                )
+            for p in css_passes[:1]:
+                result.append(
+                    f"🛸 טיאנגונג עוברת ב-{p['rise_str']} – "
+                    f"מ{p['dir_rise']} לכיוון {p['dir_set']} "
+                    f"(שיא {p['alt_peak']}°, {p['brightness']})"
+                )
+
+        return result
+
+    except Exception as e:
+        print(f"⚠️ שגיאת תחנות חלל: {e}")
+        return []
 
 
 # ══════════════════════════════════════════
@@ -523,27 +638,69 @@ def get_astronomical_data() -> dict:
 # ══════════════════════════════════════════
 
 HISTORY: dict[tuple[int,int], str] = {
+    # ינואר
     (1,  1): "1925 – ססיליה פיין-גפוסקין הוכיחה שהשמש עשויה ממימן והליום",
     (1,  4): "2004 – רכב החלל Spirit נחת בהצלחה על מאדים",
+    (1, 14): "2005 – חללית Huygens נחתה על טיטאן, ירח שבתאי",
+    (1, 19): "2006 – שיגור New Horizons לפלוטו",
     (1, 27): "1967 – אסון אפולו 1: שלושה אסטרונאוטים נספו באש",
+    (1, 28): "1986 – אסון מעבורת החלל צ'לנג'ר",
+    # פברואר
+    (2,  1): "2003 – אסון מעבורת החלל קולומביה",
     (2, 14): "1990 – תמונת 'Pale Blue Dot' – כדור הארץ ממרחק 6 מיליארד ק\"מ",
+    (2, 18): "1930 – קלייד טומבו גילה את פלוטו",
     (2, 20): "1962 – ג'ון גלן – האמריקאי הראשון שהקיף את כדור הארץ",
+    # מרץ
+    (3,  1): "1966 – Venera 3 – החללית הראשונה שנגעה בגוף שמיימי אחר (נוגה)",
     (3, 13): "1781 – ויליאם הרשל גילה את כוכב אורנוס",
     (3, 14): "1879 – נולד אלברט איינשטיין",
-    (4, 12): "1961 – יורי גגרין – האדם הראשון בחלל",
+    (3, 22): "1997 – שביט Hale-Bopp הגיע לנקודת הקרבה המרבית לשמש",
+    (3, 30): "1858 – פטנט על העיפרון עם המחק נרשם לראשונה (גם חכמה ארצית)",
+    # אפריל
+    (4,  9): "1959 – נאס\"א הכריזה על שבעת האסטרונאוטים הראשונים של תוכנית Mercury",
+    (4, 12): "1961 – יורי גגרין – האדם הראשון בחלל / 1981 – שיגור מעבורת החלל הראשונה, Columbia",
     (4, 24): "1990 – טלסקופ החלל האבל שוגר לחלל",
+    (4, 25): "1953 – ווטסון וקריק פרסמו את מבנה ה-DNA",
+    # מאי
     (5,  5): "1961 – אלן שפרד – האמריקאי הראשון בחלל",
+    (5, 14): "1973 – שיגור תחנת החלל Skylab",
     (5, 25): "1961 – נשיא קנדי הכריז על מטרת נחיתה על הירח עד סוף העשור",
+    (5, 29): "1919 – ניסוי ליקוי חמה שאישר את תורת היחסות של איינשטיין",
+    # יוני
     (6,  3): "1965 – הליכת החלל האמריקאית הראשונה (אד ווייט)",
+    (6, 16): "1963 – ולנטינה טרשקובה – האישה הראשונה בחלל",
+    (6, 18): "1983 – סאלי רייד – האישה האמריקאית הראשונה בחלל",
+    (6, 30): "1908 – אירוע טונגוסקה – פיצוץ מטאור ענק בסיביר",
+    # יולי
     (7,  4): "1997 – Mars Pathfinder נחת על מאדים",
-    (7, 20): "1969 – 🌑 נחיתת אפולו 11 – 'One small step for man...'",
+    (7, 11): "1979 – תחנת החלל Skylab שבה לאטמוספרה ונשרפה",
+    (7, 20): "1969 – 🌑 נחיתת אפולו 11 – האדם הראשון על הירח",
+    (7, 25): "1984 – סווטלנה סביצקיה – האישה הראשונה שהלכה בחלל",
+    # אוגוסט
+    (8,  6): "2012 – רכב Curiosity נחת על מאדים",
+    (8, 12): "1977 – ניסוי גלישה ראשון של מעבורת החלל Enterprise",
     (8, 25): "2012 – וויאג'ר 1 יצא מגבולות המערכת השמשית לחלל הבין-כוכבי",
+    (8, 27): "2003 – מאדים בנקודת הקרבה המרבית לכדור הארץ ב-60,000 שנה",
+    # ספטמבר
     (9,  1): "1979 – Pioneer 11 עבר לראשונה ליד שבתאי",
+    (9, 12): "1962 – נשיא קנדי נאם את נאום 'We choose to go to the Moon'",
+    (9, 15): "2017 – חללית Cassini קרסה לתוך שבתאי בסיום שליחותה",
+    (9, 23): "1846 – גיל גאל גילה את כוכב נפטון",
+    # אוקטובר
     (10, 4): "1957 – שיגור ספוטניק 1 – הלוויין המלאכותי הראשון בהיסטוריה",
+    (10, 15): "1997 – שיגור חללית Cassini לשבתאי",
+    (10, 18): "1963 – פליקס – החתול הראשון בחלל (שיגור צרפתי)",
+    (10, 28): "1971 – בריטניה הפכת למדינה השישית לשגר לוויין לחלל",
+    # נובמבר
+    (11, 3): "1957 – שיגור ספוטניק 2 עם הכלב לייקה – היצור הראשון בחלל",
     (11, 9): "1967 – ניסוי שיגור Saturn V לראשונה",
+    (11, 20): "1998 – שיגור המודול הראשון של תחנת החלל הבינלאומית (Zarya)",
+    # דצמבר
     (12, 7): "1972 – צוות אפולו 17 צילם את 'הכדור הכחול'",
-    (12,21): "1968 – אפולו 8 שוגר לירח – ראשונה שהקיף את הירח",
-    (12,24): "1968 – אסטרונאוטי אפולו 8 צילמו את 'Earthrise'",
+    (12, 19): "1972 – אפולו 17 – האדם האחרון שעמד על הירח עד היום",
+    (12, 21): "1968 – אפולו 8 שוגר לירח – המסע המאויש הראשון לירח",
+    (12, 24): "1968 – אסטרונאוטי אפולו 8 צילמו את 'Earthrise'",
+    (12, 25): "2021 – שיגור טלסקופ החלל ג'יימס וב",
 }
 
 def get_historical_event() -> str | None:
@@ -624,12 +781,13 @@ def gather_space_news(date_str: str, jewish_context: str = "") -> str:
 1. חדשות חלל בולטות השבוע – תגליות ג'יימס וב/האבל, שיגורים מיוחדים, גילויים חדשים
 2. אירועים אסטרונומיים – שביטים נראים, ליקויים, מטר מטאורים פעיל, Starlink מישראל
 3. כל דבר שחובב אסטרונומיה ישראלי לא יידע בלעדיך
+4. "ביום זה בהיסטוריה" – חפש this day in space history {date_str} ומצא אירוע היסטורי מעניין שקרה בתאריך הזה (אפשר בכל שנה). עדיפות לאירועים מרשימים: נחיתות, שיגורים ראשונים, תגליות, אסונות.
 
 החזר רשימה קצרה של עובדות גולמיות בלבד:
 • שם האירוע/תגלית
 • מה קרה בדיוק (עובדה אחת-שתיים, לא יותר)
-• האם נראה מישראל? כן/לא/חלקית
-• מתי פורסם (תאריך מדויק אם ידוע)
+• האם נראה מישראל? כן/לא/חלקית (לחדשות שוטפות בלבד)
+• מתי פורסם / באיזו שנה (תאריך מדויק אם ידוע)
 
 ללא עיצוב, ללא סגנון, ללא המלצות. רק עובדות."""}]
     }
@@ -647,7 +805,7 @@ def gather_space_news(date_str: str, jewish_context: str = "") -> str:
             )
             r.raise_for_status()
         except Exception as e:
-            if "429" in str(e) and attempt < 4:
+            if ("429" in str(e) or "529" in str(e)) and attempt < 4:
                 # נסה לקרוא את retry-after מה-header
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
@@ -749,7 +907,7 @@ def generate_message(payload: dict) -> str:
   {CLOUD_CLEAR}–{CLOUD_HOPEFUL}%  → "יש סיכוי לחלונות פתוחים"
   {CLOUD_HOPEFUL}–{CLOUD_POOR}%  → "בתקווה שהענן ייפתח..."
   מעל {CLOUD_POOR}%   → אל תדכא – ספר מה מחכה בימים הקרובים
-• ISS – ציין רק אם עננות מאפשרת (מתחת ל-{CLOUD_POOR}%)
+• ISS / טיאנגונג – ציין רק אם עננות מאפשרת (מתחת ל-{CLOUD_POOR}%)
 • חדשות חלל – תגליות האבל/ג'יימס וב, שיגורים מיוחדים, גילויים חדשים – *עדיפות גבוהה*. זה מה שאנשים לא ידעו בלעדינו
 • הבחן בין זמן גילוי לזמן פרסום: אם מחקר פורסם לפני חודשים אבל קיבל סיקור עכשיו – כתוב "מחקר שפורסם ב-X מראה..." ולא "אתמול גילו..."
 • אסטרונומיה קלאסית (מיקום כוכבים) – רק אם בולט במיוחד, לא כרשימה טכנית
@@ -792,7 +950,7 @@ def generate_message(payload: dict) -> str:
 🪐 כוכבי לכת נראים הלילה:
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}
 
-🛸 מעברי ISS:
+🛸 מעברי תחנות חלל (ISS / טיאנגונג):
 {chr(10).join(iss)}
 
 ✡️ אירועים יהודיים היום:
@@ -807,8 +965,7 @@ def generate_message(payload: dict) -> str:
 📅 אירועים יהודיים-אסטרונומיים בשבוע הקרוב:
 {upcoming_str or "אין אירועים מיוחדים"}
 
-📜 היום לפני X שנים:
-{historical or "אין אירוע מיוחד ביומן"}
+📜 היום בהיסטוריה (נמצא בחיפוש, כלול בשדה חדשות חלל למעלה):
 
 🗂 היסטוריית הודעות אחרונות:
 {history_text}
@@ -858,12 +1015,12 @@ def generate_message(payload: dict) -> str:
             r.raise_for_status()
             break
         except Exception as e:
-            if "429" in str(e) and attempt < 2:
+            if ("429" in str(e) or "529" in str(e)) and attempt < 2:
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
                 except Exception:
                     retry_after = 30 * (attempt + 1)
-                print(f"⏳ 429 – ממתין {retry_after} שניות...")
+                print(f"⏳ {e} – ממתין {retry_after} שניות...")
                 time.sleep(retry_after)
             else:
                 raise
@@ -946,7 +1103,7 @@ def main():
     astro = get_astronomical_data()
 
     print("🛸 מחשב מעברי ISS...")
-    iss   = get_iss_passes()
+    iss   = get_station_passes()
 
     print("✡️ שולף לוח שנה יהודי...")
     jdate    = get_jewish_date_info()

@@ -264,6 +264,9 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
     ash_str   = ash.strftime("%d/%m בשעה %H:%M")
     hours_to_close = (close - now).total_seconds() / 3600
 
+    # קידוש לבנה רק בלילה – אל תציג שעת סגירה שהיא ביום
+    close_night_str = f"ליל {close.strftime('%d/%m')}"
+
     # ── בקרוב (24 שעות לפני פתיחת אשכנזים) ──
     if now < ash:
         return (
@@ -302,19 +305,19 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
             )
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-            f"   ⚠️ שים לב! סוף זמן ברכה: {close_str}"
+            f"   ⚠️ שים לב! {close_night_str} הוא הלילה האחרון לברכה"
         )
 
     # ── נותרו פחות מ-24 שעות (י"ד) – הלילה האחרון ──
     if shabbat:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-            f"   ⚠️ הלילה האחרון! עד {close_str}\n"
+            f"   ⚠️ הלילה האחרון לברכה!\n"
             f"   שים לב: מכיוון שהסגירה חלה בשבת, חלון הזמן מתקצר"
         )
     return (
         f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-        f"   ⚠️ הלילה האחרון! עד {close_str}"
+        f"   ⚠️ הלילה האחרון לקידוש לבנה *וברכת הלבנה*!"
     )
 
 

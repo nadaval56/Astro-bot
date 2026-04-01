@@ -137,16 +137,11 @@ def get_jewish_date_info() -> dict:
     except Exception:
         pass
 
-    # אחרי צאת הכוכבים = יום עברי חדש.
-    # אבל: בריצת 13:00 (לפני שקיעה) אנחנו מוסיפים יום כי ההודעה ללילה הקרוב.
-    # בריצת 21:00 (אחרי שקיעה) – today כבר נותן את התאריך הנכון לאותו לילה.
+    # Hebcal מחזיר את התאריך העברי הנכון לתאריך לועזי נתון.
+    # אין צורך להוסיף יום – today תמיד נכון.
+    # after_sunset משמש רק לתצוגה ("אור ל...")
     after_sunset = bool(sunset_dt and now >= sunset_dt + timedelta(minutes=40))
-    if now.hour >= 17:
-        # ריצת לילה – already past sunset, today IS the correct Hebrew date
-        hebrew_date = today
-    else:
-        # ריצת יום – ההודעה ללילה הקרוב
-        hebrew_date = today + timedelta(days=1) if after_sunset else today
+    hebrew_date  = today
 
     url  = f"https://www.hebcal.com/converter?cfg=json&date={hebrew_date.isoformat()}&g2h=1"
     try:
@@ -1155,8 +1150,8 @@ def main():
         # ── ריצת 21:00 ──
         # שלח אם: לא נשלח היום, ולא שבת/חג עכשיו
 
-        if was_sent_today(history):
-            print("✅ כבר נשלחה הודעה היום – לא שולח שוב")
+        if was_sent_today(history) and os.environ.get("FORCE_SEND", "false").lower() != "true":
+            print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
             sys.exit(0)
 
         if is_shabbat_or_yomtov_now():

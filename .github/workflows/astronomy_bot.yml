@@ -17,6 +17,10 @@ on:
         description: 'מצב בדיקה – מדפיס בלבד, לא שולח WhatsApp'
         required: false
         default: 'false'
+      force_send:
+        description: 'שלח גם אם כבר נשלח היום'
+        required: false
+        default: 'false'
 
 jobs:
   send-astronomy-update:
@@ -45,6 +49,7 @@ jobs:
           GREEN_API_TOKEN:     ${{ secrets.GREEN_API_TOKEN }}
           WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}
           TEST_MODE:           ${{ github.event.inputs.test_mode }}
+          FORCE_SEND:          ${{ github.event.inputs.force_send }}
         run: python shamay_halayla.py
 
       - name: 💾 שמירת היסטוריית הודעות

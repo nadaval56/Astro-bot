@@ -784,6 +784,7 @@ def generate_message(payload: dict) -> str:
 
 תוכן:
 • עננות מעל {CLOUD_POOR}% – אל תדכא, ספר מה מחכה בימים הקרובים
+• *דבר על מה שהולך לקרות* – הלילה, מחר, השבוע. אירועים שכבר עברו – לא מעניינים
 • קידוש לבנה – הצג *אך ורק* את הטקסט מהשדה המצורף. אם ריק – שתיקה מוחלטת
 • חדשות חלל ותגליות – עדיפות גבוהה על מיקום כוכבים טכני
 
@@ -937,14 +938,13 @@ def send_whatsapp(message: str):
 
 def is_shabbat_or_yomtov_now() -> bool:
     """
-    בודק האם עכשיו שבת או יום טוב (ממש – בין הדלקת נרות להבדלה).
-    משתמש בהבדלה של אתמול אם צריך.
+    בודק האם עכשיו שבת או יום טוב.
+    הלוגיקה: אם אתמול הייתה הדלקת נרות → היום שבת/חג.
+    אם היום הייתה הדלקת נרות שכבר עברה → גם שבת/חג.
     """
     now   = datetime.now(ISRAEL_TZ)
     today = now.date()
 
-    # בדוק אם יש הדלקת נרות שעברה היום (= נכנסנו לשבת/חג)
-    # ואם אין הבדלה שעברה (= עדיין בשבת/חג)
     for day_offset in [0, -1]:
         check = today + timedelta(days=day_offset)
         url = (
@@ -955,29 +955,20 @@ def is_shabbat_or_yomtov_now() -> bool:
         try:
             items = requests.get(url, timeout=10).json().get("items", [])
         except Exception:
-            return False
-
-        candles_dt  = None
-        havdalah_dt = None
+            continue
 
         for item in items:
-            cat = item.get("category", "")
-            if cat == "candles":
+            if item.get("category") == "candles":
                 try:
                     candles_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                    if day_offset == -1:
+                        # אתמול הייתה הדלקת נרות → היום שבת/חג
+                        return True
+                    elif day_offset == 0 and candles_dt <= now:
+                        # היום הייתה הדלקת נרות שכבר עברה → שבת/חג
+                        return True
                 except Exception:
                     pass
-            if cat == "havdalah":
-                try:
-                    havdalah_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                except Exception:
-                    pass
-
-        if candles_dt and candles_dt <= now:
-            # הדלקת נרות עברה
-            if havdalah_dt is None or havdalah_dt > now:
-                # עדיין לא הבדלה = עכשיו שבת/חג
-                return True
 
     return False
 

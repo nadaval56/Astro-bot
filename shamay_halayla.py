@@ -936,39 +936,46 @@ def send_whatsapp(message: str):
 # 8. נקודת כניסה ראשית
 # ══════════════════════════════════════════
 
-def is_shabbat_or_yomtov_now() -> bool:
+def is_shabbat_or_yomtov_now(daytime_run: bool) -> bool:
     """
-    בודק האם עכשיו שבת או יום טוב.
-    הלוגיקה: אם אתמול הייתה הדלקת נרות → היום שבת/חג.
-    אם היום הייתה הדלקת נרות שכבר עברה → גם שבת/חג.
+    ריצת 13:00 (daytime_run=True):  אם אתמול היו נרות → חג → לא שולח
+    ריצת 21:00 (daytime_run=False): החג כבר יצא → תמיד False
     """
+    if not daytime_run:
+        return False  # ב-21:00 החג תמיד יצא כבר
+
     now   = datetime.now(ISRAEL_TZ)
     today = now.date()
+    yesterday = today - timedelta(days=1)
 
-    for day_offset in [0, -1]:
-        check = today + timedelta(days=day_offset)
-        url = (
-            f"https://www.hebcal.com/shabbat?cfg=json"
-            f"&geonameid={GEONAMEID}&m=50&lg=s"
-            f"&yt=G&date={check.isoformat()}"
-        )
-        try:
-            items = requests.get(url, timeout=10).json().get("items", [])
-        except Exception:
-            continue
-
+    url = (
+        f"https://www.hebcal.com/shabbat?cfg=json"
+        f"&geonameid={GEONAMEID}&m=50&lg=s"
+        f"&yt=G&date={yesterday.isoformat()}"
+    )
+    try:
+        items = requests.get(url, timeout=10).json().get("items", [])
         for item in items:
             if item.get("category") == "candles":
-                try:
-                    candles_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                    if day_offset == -1:
-                        # אתמול הייתה הדלקת נרות → היום שבת/חג
-                        return True
-                    elif day_offset == 0 and candles_dt <= now:
-                        # היום הייתה הדלקת נרות שכבר עברה → שבת/חג
-                        return True
-                except Exception:
-                    pass
+                return True  # אתמול היו נרות → היום שבת/חג
+    except Exception:
+        pass
+
+    # בדוק גם אם היום הייתה הדלקת נרות שכבר עברה
+    url_today = (
+        f"https://www.hebcal.com/shabbat?cfg=json"
+        f"&geonameid={GEONAMEID}&m=50&lg=s"
+        f"&yt=G&date={today.isoformat()}"
+    )
+    try:
+        items = requests.get(url_today, timeout=10).json().get("items", [])
+        for item in items:
+            if item.get("category") == "candles":
+                dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                if dt <= now:
+                    return True  # הדלקת נרות כבר עברה היום
+    except Exception:
+        pass
 
     return False
 
@@ -994,7 +1001,7 @@ def main():
         # ── ריצת 13:00 ──
         # שלח אם לא שבת/חג עכשיו
         # (הדלקת נרות בישראל לא יכולה להיות לפני ~15:30)
-        if is_shabbat_or_yomtov_now():
+        if is_shabbat_or_yomtov_now(daytime_run=True):
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
 
@@ -1006,7 +1013,7 @@ def main():
             print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
             sys.exit(0)
 
-        if is_shabbat_or_yomtov_now():
+        if is_shabbat_or_yomtov_now(daytime_run=False):
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
 

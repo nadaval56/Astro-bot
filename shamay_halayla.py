@@ -88,11 +88,10 @@ def get_jewish_date_info() -> dict:
     except Exception:
         pass
 
-    # Hebcal מחזיר את התאריך העברי הנכון לתאריך לועזי נתון.
-    # אין צורך להוסיף יום – today תמיד נכון.
-    # after_sunset משמש רק לתצוגה ("אור ל...")
-    after_sunset = bool(sunset_dt and now >= sunset_dt + timedelta(minutes=40))
-    hebrew_date  = today
+    # ריצת 13:00 = לפני שקיעה תמיד → today
+    # ריצת 21:00 = אחרי שקיעה תמיד (שקיעה בישראל לעולם לא אחרי 20:00) → today + 1
+    after_sunset = now.hour >= 17
+    hebrew_date  = today + timedelta(days=1) if after_sunset else today
 
     url  = f"https://www.hebcal.com/converter?cfg=json&date={hebrew_date.isoformat()}&g2h=1"
     try:

@@ -956,7 +956,12 @@ def is_shabbat_or_yomtov_now(daytime_run: bool) -> bool:
         items = requests.get(url, timeout=10).json().get("items", [])
         for item in items:
             if item.get("category") == "candles":
-                return True  # אתמול היו נרות → היום שבת/חג
+                try:
+                    candles_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                    if candles_dt.date() == yesterday:
+                        return True  # אתמול היו נרות ביום אתמול עצמו → היום שבת/חג
+                except Exception:
+                    pass
     except Exception:
         pass
 

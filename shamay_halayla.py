@@ -172,6 +172,10 @@ def get_jewish_events_today() -> list[str]:
             label = heb if heb else title
             print(f"  [Hebcal raw] title={title!r} hebrew={heb!r}")  # debug
 
+            # נקה סיומות של Hebcal לפני המיפוי
+            import re
+            label = re.sub(r'\s*[\(\[].*?[\)\]]', '', label).strip()
+
             # מיפוי שמות חגים מHebcal לעברית ישראלית תקנית
             HOLIDAY_MAP = {
                 # פסח
@@ -533,6 +537,11 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
         raw = r.json()["content"][0]["text"].strip()
         # נקה ```json אם יש
         raw = raw.replace("```json", "").replace("```", "").strip()
+        # מצא רק את ה-JSON (מ-{ עד })
+        start = raw.find('{')
+        end   = raw.rfind('}')
+        if start != -1 and end != -1:
+            raw = raw[start:end+1]
         summary = json.loads(raw)
         summary["_message_length"] = len(message.split())
         return summary
@@ -824,7 +833,7 @@ def generate_message(payload: dict) -> str:
 תוכן:
 • עננות מעל {CLOUD_POOR}% – אל תדכא, ספר מה מחכה בימים הקרובים
 • *דבר על מה שהולך לקרות* – הלילה, מחר, השבוע. אירועים שכבר עברו – לא מעניינים
-• לוח שנה יהודי – *אך ורק* מה שמופיע בשדות "אירועים יהודיים" ו"קידוש לבנה" למטה. אל תוסיף שום הקשר יהודי מהידע שלך – לא חגים, לא מנהגים, לא "אחרי הסדר". אם השדה ריק – שתיקה מוחלטת
+• לוח שנה יהודי – *אך ורק* מה שמופיע בשדות "אירועים יהודיים" ו"קידוש לבנה" למטה. אל תוסיף שום הקשר יהודי מהידע שלך – לא חגים, לא מנהגים, לא "אחרי הסדר", ולא קישור בין תאריכים לועזיים לתאריכים עבריים (למשל: "ביום שישי שהוא פסח ז'"). אם השדה ריק – שתיקה מוחלטת
 • חדשות חלל ותגליות – עדיפות גבוהה על מיקום כוכבים טכני
 
 תאריך עברי:

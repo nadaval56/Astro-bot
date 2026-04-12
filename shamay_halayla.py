@@ -127,7 +127,9 @@ def get_jewish_events_today() -> list[str]:
     שולף אירועים יהודיים מיוחדים מה-Hebcal ומוסיף חישובים עצמאיים.
     מחזיר רשימת מחרוזות לתצוגה.
     """
-    today = datetime.now(ISRAEL_TZ).date()
+    now   = datetime.now(ISRAEL_TZ)
+    today = now.date()
+    is_evening = now.hour >= 17  # ריצת 21:00 – שבת מברכים כבר היה
     url = (
         f"https://www.hebcal.com/hebcal?v=1&cfg=json"
         f"&maj=on&min=on&mod=on&nx=on&mf=on&ss=on"
@@ -217,18 +219,18 @@ def get_jewish_events_today() -> list[str]:
                 events.append(f"{prefix} {label}")
 
     # ── ברכת החודש ──
-    # Hebcal מחזיר "Shabbat Mevarchim" בשבת לפני ר"ח
-    # בדיקה נוספת: ב-Hebcal אפשר לבדוק לפי title
-    for item in data.get("items", []):
-        if "mevarchim" in item.get("category", "").lower() or \
-           "mevarchim" in item.get("title", "").lower():
-            try:
-                item_date = date.fromisoformat(item["date"][:10])
-            except Exception:
-                continue
-            if item_date == today:
-                month_name = item.get("title", "").replace("Shabbat Mevarchim", "").strip()
-                events.append(f"🙏 שבת מברכים את חודש {month_name if month_name else jdate['month']}")
+    # בריצת ערב (21:00) – שבת מברכים כבר היה, לא מציגים
+    if not is_evening:
+        for item in data.get("items", []):
+            if "mevarchim" in item.get("category", "").lower() or \
+               "mevarchim" in item.get("title", "").lower():
+                try:
+                    item_date = date.fromisoformat(item["date"][:10])
+                except Exception:
+                    continue
+                if item_date == today:
+                    month_name = item.get("title", "").replace("Shabbat Mevarchim", "").strip()
+                    events.append(f"🙏 שבת מברכים את חודש {month_name if month_name else jdate['month']}")
 
     return events
 
@@ -799,6 +801,7 @@ def generate_message(payload: dict) -> str:
     tekufa_msg   = payload.get("tekufa_msg")
     upcoming     = payload.get("upcoming", [])
     history_text = payload.get("history_text", "אין היסטוריה.")
+    is_motzei    = payload.get("is_motzei", False)
 
     upcoming_str = ""
     if upcoming:
@@ -824,9 +827,10 @@ def generate_message(payload: dict) -> str:
 
 עיצוב:
 • פתח ב"ערב טוב" או "לילה טוב" – קצר וחם
+• במוצאי שבת/חג – פתח ב"שבוע טוב" לא "שבת שלום"
 • שורה שנייה: תאריך בפורמט "17.3.2026 | כ״ח אדר תשפ״ו"
 • בWhatsApp: *כוכבית אחת* = בולד בלבד
-• ו' חיבור לפני בולד – בפנים: *ומאדים* לא ו*מאדים*, *וברכת הלבנה* לא ו*ברכת הלבנה*
+• אותיות שירות לפני מילה מודגשת – כנס לפנים: *המדוזה* לא ה*מדוזה*, *ומאדים* לא ו*מאדים*, *בשמיים* לא ב*שמיים*
 • אל תעטוף משפטים שלמים בכוכביות – רק מילות מפתח
 • יחידות מידה – קילומטרים בלבד, לא מיילים
 
@@ -1039,6 +1043,26 @@ def was_sent_today(history: dict) -> bool:
     return today_key in history
 
 
+def detect_motzei(now: datetime) -> bool:
+    """בודק אם עכשיו מוצאי שבת/חג – הבדלה הייתה היום לפני עכשיו"""
+    today = now.date()
+    url = (
+        f"https://www.hebcal.com/shabbat?cfg=json"
+        f"&geonameid={GEONAMEID}&m=50&lg=s"
+        f"&yt=G&date={today.isoformat()}"
+    )
+    try:
+        items = requests.get(url, timeout=10).json().get("items", [])
+        for item in items:
+            if item.get("category") == "havdalah":
+                dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
+                if dt.date() == today and dt <= now:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def main():
     now = datetime.now(ISRAEL_TZ)
     print(f"\n🔭 שמי הלילה מתחיל | {now.strftime('%A %d/%m/%Y %H:%M')}\n")
@@ -1071,6 +1095,11 @@ def main():
             sys.exit(0)
 
         print("🌙 ריצת לילה – שולח הודעה")
+
+    # זיהוי מוצאי שבת/חג
+    is_motzei = (hour >= 17) and detect_motzei(now)
+    if is_motzei:
+        print("✡️ מוצאי שבת/חג – שולח בשבוע טוב")
 
     # ── איסוף נתונים ────────────────────
     print("📚 טוען היסטוריית הודעות...")
@@ -1148,6 +1177,7 @@ def main():
         "upcoming":      upcoming,
         "history_text":  history_text,
         "space_news":    space_news,
+        "is_motzei":     is_motzei,
     }
     message = generate_message(payload)
 

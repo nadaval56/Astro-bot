@@ -509,10 +509,6 @@ def format_history_for_prompt(history: dict) -> str:
 
 
 def extract_summary_from_message(message: str, payload: dict) -> dict:
-    """
-    שולח ל-Claude בקשה קצרה לסכם מה כוסה בהודעה – לצורך היסטוריה.
-    מחזיר dict קצר לשמירה.
-    """
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
@@ -524,31 +520,32 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
         "messages": [{
             "role": "user",
             "content": (
-                "בהודעה הבאה שנשלחה לקבוצת אסטרונומיה, "
-                "תן לי JSON קצר עם הנושאים שכוסו ואיך (ברמה גבוהה). "
-                "מפתח = שם הנושא באנגלית קצר (comet, meteor_shower, iss, jupiter וכו'), "
-                "ערך = משפט קצר בעברית על מה נאמר. "
-                "החזר JSON בלבד, ללא הסברים.\n\n"
-                f"ההודעה:\n{message}"
+                "Summarize this astronomy WhatsApp message in a JSON object.\n"
+                "Rules: English keys only, short Hebrew values (max 10 words each).\n"
+                "Use keys like: weather, moon, planets, iss, space_news, history, jewish.\n"
+                "Return ONLY the JSON object, no markdown, no explanation.\n"
+                "Example: {\"weather\": \"שמיים בהירים\", \"moon\": \"סהר גדל\"}\n\n"
+                f"Message:\n{message[:1500]}"
             )
         }]
     }
+    raw = ""
     try:
         r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
         r.raise_for_status()
         raw = r.json()["content"][0]["text"].strip()
-        # נקה ```json אם יש
         raw = raw.replace("```json", "").replace("```", "").strip()
-        # מצא רק את ה-JSON (מ-{ עד })
         start = raw.find('{')
         end   = raw.rfind('}')
         if start != -1 and end != -1:
             raw = raw[start:end+1]
         summary = json.loads(raw)
         summary["_message_length"] = len(message.split())
+        print(f"✅ סיכום נשמר: {list(summary.keys())}")
         return summary
     except Exception as e:
         print(f"⚠️ לא הצלחתי לסכם היסטוריה: {e}")
+        print(f"   raw: {raw[:200]}")
         return {"_message_length": len(message.split())}
 
 def deg_to_dir(deg: float) -> str:

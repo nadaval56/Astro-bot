@@ -808,7 +808,12 @@ def generate_message(payload: dict) -> str:
         lines = []
         for ev in upcoming[:5]:
             d = ev["days_away"]
-            when = "מחר" if d == 1 else f"בעוד {d} ימים"
+            DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+            ev_day = DAY_NAMES[ev["date"].weekday()]
+            if d == 1:
+                when = "מחר"
+            else:
+                when = f"יום {ev_day} ({ev['date'].strftime('%d/%m')})"
             lines.append(f"  • {when}: {ev['title']}")
         upcoming_str = "\n".join(lines)
 
@@ -1044,7 +1049,7 @@ def was_sent_today(history: dict) -> bool:
 
 
 def detect_motzei(now: datetime) -> bool:
-    """בודק אם עכשיו מוצאי שבת/חג – הבדלה הייתה היום לפני עכשיו"""
+    """בודק אם עכשיו מוצאי שבת/חג – הבדלה הייתה היום לאחרונה (עד 4 שעות אחורה)"""
     today = now.date()
     url = (
         f"https://www.hebcal.com/shabbat?cfg=json"
@@ -1056,7 +1061,8 @@ def detect_motzei(now: datetime) -> bool:
         for item in items:
             if item.get("category") == "havdalah":
                 dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                if dt.date() == today and dt <= now:
+                hours_since = (now - dt).total_seconds() / 3600
+                if dt.date() == today and 0 <= hours_since <= 4:
                     return True
     except Exception:
         pass

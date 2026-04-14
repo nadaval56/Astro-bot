@@ -579,16 +579,53 @@ def get_astronomical_data() -> dict:
         elif age < 22.5: phase_name = "🌗 רבע אחרון"
         else:            phase_name = "🌘 סהר פוחת"
 
-        def fmt_rise_set(body, ev_fn):
-            try:
-                return ephem.localtime(ev_fn(body)).strftime("%H:%M")
-            except Exception:
-                return None
+        # ── שמש ──
+        sun = ephem.Sun(obs)
+        try:
+            sunset_utc = obs.next_setting(sun).datetime()
+            sunset_dt  = sunset_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            sunset     = sunset_dt.strftime("%H:%M")
+            sunrise_utc = obs.next_rising(sun).datetime()
+            sunrise    = sunrise_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ).strftime("%H:%M")
+        except Exception:
+            sunset_dt  = None
+            sunset = sunrise = "N/A"
 
-        moon_rise = fmt_rise_set(moon, obs.next_rising)
-        moon_set  = fmt_rise_set(moon, obs.next_setting)
+        # ── ירח – זריחה/שקיעה ביחס לחלון הצפייה (אחרי שקיעת השמש) ──
+        # חישוב מיקום הירח בשקיעת השמש (חלון תחילת הצפייה)
+        obs_evening = ephem.Observer()
+        obs_evening.lat  = obs.lat
+        obs_evening.lon  = obs.lon
+        obs_evening.elev = obs.elev
+        if sunset_dt:
+            import calendar
+            obs_evening.date = ephem.Date(sunset_utc.strftime("%Y/%m/%d %H:%M:%S"))
+        else:
+            obs_evening.date = obs.date
 
-        # ── כוכבי לכת ──
+        moon_evening = ephem.Moon(obs_evening)
+
+        # מצא: מתי הירח עולה ומתי שוקע במהלך חלון 20:00-02:00
+        moon_rise = None
+        moon_set  = None
+        try:
+            rise_utc = obs_evening.next_rising(moon_evening).datetime()
+            rise_dt  = rise_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            if 19 <= rise_dt.hour or rise_dt.hour < 6:
+                moon_rise = rise_dt.strftime("%H:%M")
+        except Exception:
+            pass
+        try:
+            set_utc = obs_evening.next_setting(moon_evening).datetime()
+            set_dt  = set_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            if 19 <= set_dt.hour or set_dt.hour < 6:
+                moon_set = set_dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+        # האם הירח גלוי בתחילת הלילה?
+        moon_alt_evening = math.degrees(float(moon_evening.alt))
+        moon_visible_evening = moon_alt_evening > 0
         planet_defs = [
             ("נוגה ♀",  ephem.Venus),
             ("מאדים ♂", ephem.Mars),
@@ -607,23 +644,17 @@ def get_astronomical_data() -> dict:
                     f"{name} – גובה {round(alt_deg)}°, כיוון {deg_to_dir(az)}, בהירות {mag}"
                 )
 
-        # ── שמש ──
-        sun = ephem.Sun(obs)
-        try:
-            sunset  = ephem.localtime(obs.next_setting(sun)).strftime("%H:%M")
-            sunrise = ephem.localtime(obs.next_rising(sun)).strftime("%H:%M")
-        except Exception:
-            sunset = sunrise = "N/A"
-
+        # ── שמש (כבר חושב למעלה) ──
         return {
-            "moon_pct":        pct,
-            "moon_phase":      phase_name,
-            "moon_age":        round(age, 1),
-            "moon_rise":       moon_rise,
-            "moon_set":        moon_set,
-            "planets_visible": planets_visible,
-            "sunset":          sunset,
-            "sunrise":         sunrise,
+            "moon_pct":             pct,
+            "moon_phase":           phase_name,
+            "moon_age":             round(age, 1),
+            "moon_rise":            moon_rise,
+            "moon_set":             moon_set,
+            "moon_visible_evening": moon_visible_evening,
+            "planets_visible":      planets_visible,
+            "sunset":               sunset,
+            "sunrise":              sunrise,
         }
 
     except ImportError:
@@ -643,6 +674,105 @@ def get_astronomical_data() -> dict:
 # ══════════════════════════════════════════
 # 6. יצירת ההודעה עם Claude Opus
 # ══════════════════════════════════════════
+
+from auto_fix import auto_fix
+
+
+def fix_opening(message: str, payload: dict) -> str:
+    """
+    Python בלבד – מתקן את שורת הפתיחה לפי שעה.
+    ודאי 100%, לא תלוי ב-AI.
+    """
+    now_hour  = datetime.now(ISRAEL_TZ).hour
+    is_motzei = payload.get("is_motzei", False)
+
+    if is_motzei:
+        correct = "שבוע טוב"
+    elif now_hour < 17:
+        correct = "צהריים טובים"
+    elif now_hour < 21:
+        correct = "ערב טוב"
+    else:
+        correct = "לילה טוב"
+
+    # פצל לשורה ראשונה + שאר
+    lines = message.split("\n", 1)
+    first_line = lines[0]
+    rest       = lines[1] if len(lines) > 1 else ""
+
+    # בדוק אם הפתיחה נכונה
+    VALID_OPENINGS = ["ערב טוב", "לילה טוב", "צהריים טובים", "שבוע טוב", "מוצאי שבת"]
+    needs_fix = not any(first_line.startswith(o) for o in VALID_OPENINGS)
+    wrong_opening = any(
+        first_line.startswith(o) for o in VALID_OPENINGS
+        if o != correct and not (correct == "ערב טוב" and o == "לילה טוב")
+    )
+
+    if needs_fix or wrong_opening:
+        # מצא את האימוג'י אם יש
+        import re
+        emoji_match = re.search(r'[\U00010000-\U0010ffff\u2600-\u26FF\u2700-\u27BF]', first_line)
+        emoji = " " + emoji_match.group(0) if emoji_match else " 🌙"
+        new_first = f"{correct}{emoji}"
+        print(f"🔧 fix_opening: '{first_line.strip()}' → '{new_first}'")
+        return new_first + "\n" + rest
+
+    return message
+
+
+def quality_check(message: str, payload: dict) -> str:
+    """
+    Sonnet – בקרה לוגית בלבד.
+    בודק רק: "הלילה" על אירוע שכבר היה, וחזרות מהיסטוריה.
+    הנחיה מחמירה: לא לשנות ניסוח, לא לקצר, לא לערוך.
+    """
+    sunset       = payload.get("astro", {}).get("sunset", "N/A")
+    history_text = payload.get("history_text", "")
+
+    # אם אין היסטוריה – בדוק רק "הלילה"
+    history_section = (
+        f"\nהיסטוריה אחרונה (בדוק חזרות):\n{history_text[:400]}"
+        if history_text and history_text != "אין היסטוריה – זו ההודעה הראשונה."
+        else ""
+    )
+
+    headers = {
+        "x-api-key":         ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+    }
+    body = {
+        "model":      CLAUDE_MODEL,
+        "max_tokens": 1200,
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"אתה בודק עובדתי של הודעה. שתי משימות בלבד:\n\n"
+                f"1. 'הלילה': שקיעה היום ב-{sunset}. "
+                f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
+                f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
+                f"2. חזרה: אם חדשה מופיעה בהיסטוריה ממש באותן מילים – "
+                f"הסר את המשפט הספציפי. אחרת – אל תגע.{history_section}\n\n"
+                f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
+                f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n\n"
+                f"ההודעה:\n{message}"
+            )
+        }]
+    }
+    try:
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r.raise_for_status()
+        result = r.json()["content"][0]["text"].strip()
+        # בדוק שהתוצאה סבירה – לא קצרה משמעותית
+        if result and len(result) >= len(message) * 0.85:
+            print("✅ quality_check: הושלם")
+            return result
+        print("⚠️ quality_check: תוצאה קצרה מדי – שומר מקורי")
+        return message
+    except Exception as e:
+        print(f"⚠️ quality_check נכשל: {e} – ממשיך בלי")
+        return message
+
 
 def proofread_hebrew(message: str) -> str:
     """
@@ -828,56 +958,40 @@ def generate_message(payload: dict) -> str:
     # חלק סטטי – נשמר במטמון (cache_control)
     # משתנה רק כשמעדכנים את הקוד
     # ══════════════════════════════════════════
-    STATIC_RULES = f"""אתה חובב אסטרונומיה ותיק שמנהל קבוצת WhatsApp לחברים. יש לך קול – חם, סקרן, מדויק. אתה כותב כמו מדריך טיול שמסביר נוף מרהיב: ישיר, אוהב, לא מנסה יותר מדי. כשיש חיבור מעניין בין נתונים – אתה מוצא אותו בתוך המשפט, לא בפסקה נפרדת שכל תפקידה להיות יפה. כשאין כלום – אתה כנה.
-
-כתוב בעברית תקנית וזורמת. כל משפט אומר משהו מדויק – לא שירה בשביל שירה.
-ההודעה תוצג ב-WhatsApp – RTL, עברית בלבד.
-
-═══════════════════════════════
-כללים טכניים:
-═══════════════════════════════
-
-עיצוב:
-• פתח ב"ערב טוב" או "לילה טוב" בלבד – קצר וחם
-• אם מופיע "⚠️ מוצאי שבת/חג" בנתונים – פתח ב"שבוע טוב" במקום
-• שורה שנייה: תאריך בפורמט "17.3.2026 | כ״ח אדר תשפ״ו"
-• בWhatsApp: *כוכבית אחת* = בולד בלבד
-• אותיות שירות לפני מילה מודגשת – כנס לפנים: *המדוזה* לא ה*מדוזה*, *ומאדים* לא ו*מאדים*, *בשמיים* לא ב*שמיים*
-• אל תעטוף משפטים שלמים בכוכביות – רק מילות מפתח
-• יחידות מידה – קילומטרים בלבד, לא מיילים
-
-תוכן:
-• עננות מעל {CLOUD_POOR}% – אל תדכא, ספר מה מחכה בימים הקרובים
-• *דבר על מה שהולך לקרות* – הלילה, מחר, השבוע. אירועים שכבר עברו – לא מעניינים
-• זריחת/שקיעת הירח – ציין תמיד בשעה מדויקת (לא "אחרי שעה בלילה" אלא "ב-01:23")
-• אם אירוע מופיע כ"מחר" אבל מתחיל בערב (יום הזיכרון, יום השואה, חג) – כתוב "הערב" כי הוא מתחיל בשקיעה
-• לוח שנה יהודי – *אך ורק* מה שמופיע בשדות "אירועים יהודיים" ו"קידוש לבנה" למטה. אל תוסיף שום הקשר יהודי מהידע שלך – לא חגים, לא מנהגים, לא "אחרי הסדר", ולא קישור בין תאריכים לועזיים לתאריכים עבריים (למשל: "ביום שישי שהוא פסח ז'"). אם השדה ריק – שתיקה מוחלטת
-• חדשות חלל ותגליות – עדיפות גבוהה על מיקום כוכבים טכני
-• אל תשתמש בשאלות רטוריות ("מה לא קרה השבוע?") – כתוב ישירות
-
-תאריך עברי:
-• ראש חודש / שבת / חג שמתחיל הלילה – "הלילה", לא "מחר"
-
-סיום:
-• סיים תמיד: "שאו מרום עיניכם וראו מי ברא אלה 🌌"
-
-אורך:
-• מקסימום 150 מילה. כל משפט מרוויח את מקומו."""
+    # קרא כללים מקובץ חיצוני – קל לעריכה ב-GitHub
+    rules_file = Path(__file__).parent / "rules.md"
+    if rules_file.exists():
+        STATIC_RULES = rules_file.read_text(encoding="utf-8")
+        print("📋 כללים נטענו מ-rules.md")
+    else:
+        # fallback – כללים מינימליים
+        STATIC_RULES = """אתה חובב אסטרונומיה שמנהל קבוצת WhatsApp. כתוב בעברית תקנית, חמה, מדויקת.
+סיים תמיד: "שאו מרום עיניכם וראו מי ברא אלה 🌌"
+מקסימום 150 מילה."""
+        print("⚠️ rules.md לא נמצא – משתמש בכללים מינימליים")
 
     # ══════════════════════════════════════════
     # חלק דינמי – משתנה כל יום (ללא מטמון)
     # ══════════════════════════════════════════
+    now_il       = datetime.now(ISRAEL_TZ)
+    current_time = now_il.strftime("%H:%M")
+    is_daytime   = now_il.hour < 17
+
     DYNAMIC_DATA = f"""═══════════════════════════════
-נתוני הערב — {date_str}
+נתוני הערב — {date_str} | שעה: {current_time}
+{'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei else ''}
+{'⚠️ שעת אחר הצהריים – פתח ב"צהריים טובים" ולא ב"ערב טוב"!' if is_daytime else ''}
 ═══════════════════════════════
 
-📅 תאריך עברי: {jdate['hebrew_display']}
+📅 תאריך עברי עכשיו: {jdate['hebrew_display']}
+⚠️ הלילה הקרוב (אחרי שקיעה ב-{astro.get('sunset','N/A')}) יהיה כבר היום העברי הבא – אל תכתוב על אירועי היום כאילו הם "הלילה"!
 
 🌤 עננות: {cloud_pct}%
    הערכה: {cloud_desc}
 
 🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
-   זריחה: {astro.get('moon_rise','N/A')} | שקיעה: {astro.get('moon_set','N/A')}
+   נוכח בתחילת הלילה: {'כן' if astro.get('moon_visible_evening') else 'לא – שקע לפני השקיעה'}
+   {'זריחה בלילה: ' + astro['moon_rise'] if astro.get('moon_rise') else 'לא עולה הלילה'}{'   | שקיעה בלילה: ' + astro['moon_set'] if astro.get('moon_set') else ''}
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
@@ -1196,6 +1310,15 @@ def main():
         "is_motzei":     is_motzei,
     }
     message = generate_message(payload)
+
+    print("🔧 תיקונים אוטומטיים...")
+    message = auto_fix(message)
+
+    print("🕐 תיקון פתיחה לפי שעה...")
+    message = fix_opening(message, payload)
+
+    print("🔍 בקרה לוגית...")
+    message = quality_check(message, payload)
 
     print("✍️ מגיה עברית...")
     message = proofread_hebrew(message)

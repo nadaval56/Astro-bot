@@ -522,9 +522,10 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
             "content": (
                 "Summarize this astronomy WhatsApp message in a JSON object.\n"
                 "Rules: English keys only, short Hebrew values (max 10 words each).\n"
-                "Use keys like: weather, moon, planets, iss, space_news, history, jewish.\n"
-                "Return ONLY the JSON object, no markdown, no explanation.\n"
-                "Example: {\"weather\": \"שמיים בהירים\", \"moon\": \"סהר גדל\"}\n\n"
+                "Use these keys: weather, moon, planets, iss, space_news, jewish\n"
+                "IMPORTANT: this_day_history key = ONLY for 'X years ago today' anniversary events.\n"
+                "Current news/discoveries go in space_news, NOT in this_day_history.\n"
+                "Return ONLY the JSON object, no markdown, no explanation.\n\n"
                 f"Message:\n{message[:1500]}"
             )
         }]
@@ -751,8 +752,8 @@ def quality_check(message: str, payload: dict) -> str:
                 f"1. 'הלילה': שקיעה היום ב-{sunset}. "
                 f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
                 f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
-                f"2. חזרה: אם חדשה מופיעה בהיסטוריה ממש באותן מילים – "
-                f"הסר את המשפט הספציפי. אחרת – אל תגע.{history_section}\n\n"
+                f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
+                f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
                 f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
                 f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n\n"
                 f"ההודעה:\n{message}"

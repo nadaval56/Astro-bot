@@ -689,12 +689,14 @@ def fix_opening(message: str, payload: dict) -> str:
 
     if is_motzei:
         correct = "שבוע טוב"
-    elif now_hour < 17:
-        correct = "צהריים טובים"
-    elif now_hour < 21:
-        correct = "ערב טוב"
-    else:
+    elif now_hour >= 21 or now_hour < 6:
         correct = "לילה טוב"
+    elif now_hour >= 17:
+        correct = "ערב טוב"
+    elif now_hour >= 12:
+        correct = "צהריים טובים"
+    else:
+        correct = "בוקר טוב"
 
     # פצל לשורה ראשונה + שאר
     lines = message.split("\n", 1)
@@ -991,8 +993,9 @@ def generate_message(payload: dict) -> str:
    הערכה: {cloud_desc}
 
 🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
-   נוכח בתחילת הלילה: {'כן' if astro.get('moon_visible_evening') else 'לא – שקע לפני השקיעה'}
-   {'זריחה בלילה: ' + astro['moon_rise'] if astro.get('moon_rise') else 'לא עולה הלילה'}{'   | שקיעה בלילה: ' + astro['moon_set'] if astro.get('moon_set') else ''}
+   {'🌙 גלוי בתחילת הלילה' if astro.get('moon_visible_evening') else '🌙 לא גלוי בתחילת הלילה (שקע לפני החשיכה)'}
+   {('🌙 יזרח הלילה ב-' + astro['moon_rise'] + ' (השמיים חשוכים עד אז)') if astro.get('moon_rise') else '🌙 לא יזרח בשעות הלילה'}
+   {('🌙 ישקע הלילה ב-' + astro['moon_set']) if astro.get('moon_set') else ''}
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}

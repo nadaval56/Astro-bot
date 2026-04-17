@@ -65,49 +65,27 @@ WHATSAPP_GROUP_ID      = os.environ["WHATSAPP_GROUP_ID"]   # e.g. "972501234567-
 
 def get_jewish_date_info() -> dict:
     """
-    מחזיר את התאריך העברי הנכון לתצוגה.
-    אחרי צאת הכוכבים (~40 דקות אחרי שקיעה) כבר מתחיל היום העברי הבא,
-    ומציגים "אור ל[יום הבא]".
+    מחזיר את התאריך העברי הנכון באמצעות pyluach – חישוב מקומי, ללא API.
+    pyluach משנה תאריך עברי בחצות. אחרי שקיעה (17:00+) מוסיפים יום.
     """
-    now   = datetime.now(ISRAEL_TZ)
-    today = now.date()
+    from pyluach import dates as pdates, hebrewcal
 
-    # חישוב שקיעה ישיר עם ephem – עובד כל יום, לא רק ערב שבת
-    sunset_dt = None
-    try:
-        import ephem
-        obs        = ephem.Observer()
-        obs.lat    = str(LAT)
-        obs.lon    = str(LON)
-        obs.elev   = ALT
-        obs.date   = now.astimezone(pytz.utc)
-        sun        = ephem.Sun()
-        # previous_setting = שקיעה של היום (גם אם כבר עברה)
-        sunset_utc = obs.previous_setting(sun).datetime().replace(tzinfo=pytz.utc)
-        sunset_dt  = sunset_utc.astimezone(ISRAEL_TZ)
-    except Exception:
-        pass
+    now          = datetime.now(ISRAEL_TZ)
+    after_sunset = now.hour >= 17  # ריצת 21:00 = תמיד אחרי שקיעה
 
-    # ריצת 13:00 = לפני שקיעה תמיד → today
-    # ריצת 21:00 = אחרי שקיעה תמיד (שקיעה בישראל לעולם לא אחרי 20:00) → today + 1
-    after_sunset = now.hour >= 17
-    hebrew_date  = today + timedelta(days=1) if after_sunset else today
-
-    url  = f"https://www.hebcal.com/converter?cfg=json&date={hebrew_date.isoformat()}&g2h=1"
-    try:
-        data = requests.get(url, timeout=10).json()
-    except Exception:
-        data = {}
-
-    hd = data.get("hd", 0)
-    hm = data.get("hm", "")
-    hy = data.get("hy", 0)
-
-    # ניסוח התאריך העברי – "אור ל..." אחרי שקיעה
+    hdate = pdates.HebrewDate.today()
     if after_sunset:
-        hebrew_display = f"אור ל-{hd} {hm} {hy}"
+        hdate = hdate + 1  # ריצת 21:00 → יום עברי הבא תמיד
+
+    hd = hdate.day
+    hm = hdate.month_name(hebrew=True)
+    hy = hebrewcal.Year(hdate.year).year_string()
+
+    # תצוגה
+    if after_sunset:
+        hebrew_display = f"אור ל-{hdate.hebrew_day()} {hm} {hy}"
     else:
-        hebrew_display = f"{hd} {hm} {hy}"
+        hebrew_display = f"{hdate.hebrew_day()} {hm} {hy}"
 
     return {
         "day":                    hd,
@@ -124,21 +102,30 @@ def get_jewish_date_info() -> dict:
 
 def get_jewish_events_today() -> list[str]:
     """
-    שולף אירועים יהודיים מיוחדים מה-Hebcal ומוסיף חישובים עצמאיים.
-    מחזיר רשימת מחרוזות לתצוגה.
+    שולף אירועים יהודיים – חגים מ-pyluach, זמנים מ-Hebcal.
     """
-    now   = datetime.now(ISRAEL_TZ)
-    today = now.date()
-    is_evening = now.hour >= 17  # ריצת 21:00 – שבת מברכים כבר היה
-    url = (
-        f"https://www.hebcal.com/hebcal?v=1&cfg=json"
-        f"&maj=on&min=on&mod=on&nx=on&mf=on&ss=on"
-        f"&year={today.year}&month={today.month}"
-        f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
-    )
-    data  = requests.get(url, timeout=10).json()
-    jdate = get_jewish_date_info()
+    from pyluach import dates as pdates, hebrewcal as pheb
+
+    now        = datetime.now(ISRAEL_TZ)
+    today      = now.date()
+    is_evening = now.hour >= 17
+
+    jdate  = get_jewish_date_info()
+    hdate  = pdates.HebrewDate.today()
+    if is_evening:
+        hdate = hdate + 1
+
     events = []
+
+    # ── חג / יו"ט מ-pyluach ──
+    holiday = hdate.holiday(hebrew=True, israel=True)
+    if holiday:
+        events.append(f"✡️ {holiday}")
+
+    # ── צום מ-pyluach ──
+    fast = pheb.fast_day(hdate, hebrew=True)
+    if fast:
+        events.append(f"🕯️ {fast}")
 
     # ── ראש חודש ──
     if jdate["is_rosh_chodesh"]:
@@ -146,7 +133,7 @@ def get_jewish_events_today() -> list[str]:
 
     # ── ערב ראש חודש ──
     if jdate["is_erev_rosh_chodesh"]:
-        events.append(f"📅 מחר ראש חודש {jdate['month']} – ערב טוב לברכת ראש חודש")
+        events.append(f"📅 מחר ראש חודש {jdate['month']}")
 
     # ── קידוש לבנה / ברכת הלבנה ──
     if jdate["is_last_kiddush_levana"]:
@@ -158,79 +145,27 @@ def get_jewish_events_today() -> list[str]:
             f"(יום {jdate['day']} ב{jdate['month']}, עוד {days_left} ימים)"
         )
 
-    # ── אירועים מ-Hebcal ──
-    RELEVANT_CATS = {"holiday", "roshchodesh", "minor", "zmanim", "mevarchim"}
-    for item in data.get("items", []):
-        try:
-            item_date = date.fromisoformat(item["date"][:10])
-        except Exception:
-            continue
-        if item_date != today:
-            continue
-        cat = item.get("category", "")
-        if cat in RELEVANT_CATS:
-            title = item.get("title", "")
-            heb   = item.get("hebrew", "")
-            label = heb if heb else title
-            print(f"  [Hebcal raw] title={title!r} hebrew={heb!r}")  # debug
-
-            # נקה סיומות של Hebcal לפני המיפוי
-            import re
-            label = re.sub(r'\s*[\(\[].*?[\)\]]', '', label).strip()
-
-            # מיפוי שמות חגים מHebcal לעברית ישראלית תקנית
-            HOLIDAY_MAP = {
-                # פסח
-                "פסח א׳":            "פסח",
-                "פסח ב׳":            "יום א׳ של חול המועד פסח",
-                "פסח ג׳":            "יום ב׳ של חול המועד פסח",
-                "פסח ד׳":            "יום ג׳ של חול המועד פסח",
-                "פסח ה׳":            "יום ד׳ של חול המועד פסח",
-                "פסח ו׳":            "יום ה׳ של חול המועד פסח",
-                "פסח ז׳":            "שביעי של פסח",
-                "אסרו חג פסח":       "אסרו חג",
-                # סוכות
-                "סוכות א׳":          "סוכות",
-                "סוכות ב׳":          "יום א׳ של חול המועד סוכות",
-                "סוכות ג׳":          "יום ב׳ של חול המועד סוכות",
-                "סוכות ד׳":          "יום ג׳ של חול המועד סוכות",
-                "סוכות ה׳":          "יום ד׳ של חול המועד סוכות",
-                "סוכות ו׳":          "יום ה׳ של חול המועד סוכות",
-                "סוכות ז׳":          "הושענא רבה",
-                "שמיני עצרת":        "שמיני עצרת ושמחת תורה",
-                "אסרו חג סוכות":     "אסרו חג",
-                # שבועות
-                "שבועות":            "שבועות",
-                "שבועות ב׳":         "שבועות",
-                "אסרו חג שבועות":    "אסרו חג",
-                # חנוכה
-                "חנוכה: א׳ נר":      "נר ראשון של חנוכה",
-                "חנוכה: ב׳ נרות":   "נר שני של חנוכה",
-                "חנוכה: ג׳ נרות":   "נר שלישי של חנוכה",
-                "חנוכה: ד׳ נרות":   "נר רביעי של חנוכה",
-                "חנוכה: ה׳ נרות":   "נר חמישי של חנוכה",
-                "חנוכה: ו׳ נרות":   "נר שישי של חנוכה",
-                "חנוכה: ז׳ נרות":   "נר שביעי של חנוכה",
-                "חנוכה: ח׳ נרות":   "נר שמיני של חנוכה",
-            }
-            label = HOLIDAY_MAP.get(label, label)
-            if label and label not in [e.split("–")[0].strip() for e in events]:
-                prefix = "✡️" if cat == "holiday" else "📿"
-                events.append(f"{prefix} {label}")
-
-    # ── ברכת החודש ──
-    # בריצת ערב (21:00) – שבת מברכים כבר היה, לא מציגים
+    # ── שבת מברכים – עדיין מ-Hebcal (pyluach לא מכסה את זה) ──
     if not is_evening:
-        for item in data.get("items", []):
-            if "mevarchim" in item.get("category", "").lower() or \
-               "mevarchim" in item.get("title", "").lower():
-                try:
-                    item_date = date.fromisoformat(item["date"][:10])
-                except Exception:
-                    continue
-                if item_date == today:
-                    month_name = item.get("title", "").replace("Shabbat Mevarchim", "").strip()
-                    events.append(f"🙏 שבת מברכים את חודש {month_name if month_name else jdate['month']}")
+        url = (
+            f"https://www.hebcal.com/hebcal?v=1&cfg=json"
+            f"&maj=on&min=on&mod=on&nx=on&mf=on&ss=on"
+            f"&year={today.year}&month={today.month}"
+            f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
+        )
+        try:
+            data = requests.get(url, timeout=10).json()
+            for item in data.get("items", []):
+                if "mevarchim" in item.get("category", "").lower() or \
+                   "mevarchim" in item.get("title", "").lower():
+                    try:
+                        item_date = date.fromisoformat(item["date"][:10])
+                    except Exception:
+                        continue
+                    if item_date == today:
+                        events.append(f"🙏 שבת מברכים את חודש {jdate['month']}")
+        except Exception:
+            pass
 
     return events
 
@@ -1333,7 +1268,10 @@ def main():
 
     # ── שליחה ───────────────────────────
     print("📱 שולח WhatsApp...")
-    send_whatsapp(message)
+    if os.environ.get("DRY_RUN", "false").lower() == "true":
+        print("🔍 DRY_RUN=true – לא שולח ווטסאפ")
+    else:
+        send_whatsapp(message)
 
     # ── שמירת היסטוריה ──────────────────
     print("📚 מסכם ושומר היסטוריה...")

@@ -129,11 +129,26 @@ def get_jewish_events_today() -> list[str]:
 
     # ── ראש חודש ──
     if jdate["is_rosh_chodesh"]:
-        events.append(f"🌑 ראש חודש {jdate['month']} – חודש טוב!")
+        # יום ל׳ = ראש חודש של החודש הבא, לא הנוכחי
+        if jdate["day"] == 30:
+            from pyluach import dates as pdates, hebrewcal as pheb
+            hdate = pdates.HebrewDate.today()
+            if jdate["after_sunset"]:
+                hdate = hdate + 1
+            next_month = pheb.Month(hdate.year, hdate.month) + 1
+            rc_month = next_month.month_name(hebrew=True)
+        else:
+            rc_month = jdate["month"]
+        events.append(f"🌑 ראש חודש {rc_month} – חודש טוב!")
 
     # ── ערב ראש חודש ──
     if jdate["is_erev_rosh_chodesh"]:
-        events.append(f"📅 מחר ראש חודש {jdate['month']}")
+        from pyluach import dates as pdates, hebrewcal as pheb
+        hdate = pdates.HebrewDate.today()
+        if jdate["after_sunset"]:
+            hdate = hdate + 1
+        next_month = pheb.Month(hdate.year, hdate.month) + 1
+        events.append(f"📅 מחר ראש חודש {next_month.month_name(hebrew=True)}")
 
     # ── קידוש לבנה / ברכת הלבנה ──
     if jdate["is_last_kiddush_levana"]:

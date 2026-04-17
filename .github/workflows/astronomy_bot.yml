@@ -8,8 +8,8 @@ on:
     # ריצה 2: כל יום 19:00 UTC = 21:00 ישראל
     #   → שולח אם לא נשלח היום ולא שבת/חג עכשיו
     # ═══════════════════════════════════════════════════════
-    - cron: '0 11 * * *'   # כל יום 13:00 ישראל (חורף) / 14:00 (קיץ)
-    - cron: '0 18 * * *'   # כל יום 21:00 ישראל (קיץ) / 20:00 (חורף)
+    - cron: '0 11 * * *'   # כל יום 14:00 ישראל (קיץ)
+    - cron: '30 17 * * *'  # כל יום 20:30 ישראל (קיץ)
 
   workflow_dispatch:
     inputs:
@@ -50,6 +50,7 @@ jobs:
           WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}
           TEST_MODE:           ${{ github.event.inputs.test_mode }}
           FORCE_SEND:          ${{ github.event.inputs.force_send }}
+          DRY_RUN:             ${{ github.event.inputs.test_mode }}
         run: python shamay_halayla.py
 
       - name: 💾 שמירת היסטוריית הודעות

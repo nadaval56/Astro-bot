@@ -504,7 +504,13 @@ def deg_to_dir(deg: float) -> str:
 
 
 def get_astronomical_data() -> dict:
-    """מחשב מיקום ירח, שלב הירח, כוכבי לכת נראים מישראל הערב"""
+    """
+    מחשב מיקום ירח, שלב הירח, כוכבי לכת נראים מישראל הערב.
+
+    חשוב: כל חישובי הכוכבים נעשים לשעת הצפייה (19:30 ישראל),
+    לא לשעת הריצה! אחרת כוכבים שנמצאים מעל האופק בבוקר
+    אבל שוקעים לפני הערב יופיעו בטעות.
+    """
     try:
         import ephem
 
@@ -512,7 +518,34 @@ def get_astronomical_data() -> dict:
         obs.lat   = str(LAT)
         obs.lon   = str(LON)
         obs.elev  = ALT
-        obs.date  = datetime.now(pytz.utc)
+
+        # ══════════════════════════════════════════
+        # שלב 1: חישוב שקיעה/זריחה
+        # מגדירים זמן צהריים (תמיד לפני שקיעה) כדי ש-next_setting ייתן את שקיעת היום
+        # ══════════════════════════════════════════
+        noon_il  = datetime.now(ISRAEL_TZ).replace(hour=12, minute=0, second=0, microsecond=0)
+        noon_utc = noon_il.astimezone(pytz.utc)
+        obs.date = noon_utc
+
+        sun = ephem.Sun(obs)
+        try:
+            sunset_utc  = obs.next_setting(sun).datetime()
+            sunset_dt   = sunset_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            sunset      = sunset_dt.strftime("%H:%M")
+            # next_rising מצהריים → זריחת מחר בבוקר (שזה מה שאנחנו רוצים)
+            sunrise_utc = obs.next_rising(sun).datetime()
+            sunrise     = sunrise_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ).strftime("%H:%M")
+        except Exception:
+            sunset_dt  = None
+            sunset = sunrise = "N/A"
+
+        # ══════════════════════════════════════════
+        # שלב 2: מעבר לזמן ערב (19:30 ישראל) לכל שאר החישובים
+        # כוכבי לכת, ירח, מיקומים – הכל לשעת תחילת הצפייה
+        # ══════════════════════════════════════════
+        evening_il  = datetime.now(ISRAEL_TZ).replace(hour=19, minute=30, second=0, microsecond=0)
+        evening_utc = evening_il.astimezone(pytz.utc)
+        obs.date    = evening_utc
 
         # ── ירח ──
         moon = ephem.Moon(obs)
@@ -530,26 +563,12 @@ def get_astronomical_data() -> dict:
         elif age < 22.5: phase_name = "🌗 רבע אחרון"
         else:            phase_name = "🌘 סהר פוחת"
 
-        # ── שמש ──
-        sun = ephem.Sun(obs)
-        try:
-            sunset_utc = obs.next_setting(sun).datetime()
-            sunset_dt  = sunset_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
-            sunset     = sunset_dt.strftime("%H:%M")
-            sunrise_utc = obs.next_rising(sun).datetime()
-            sunrise    = sunrise_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ).strftime("%H:%M")
-        except Exception:
-            sunset_dt  = None
-            sunset = sunrise = "N/A"
-
         # ── ירח – זריחה/שקיעה ביחס לחלון הצפייה (אחרי שקיעת השמש) ──
-        # חישוב מיקום הירח בשקיעת השמש (חלון תחילת הצפייה)
         obs_evening = ephem.Observer()
         obs_evening.lat  = obs.lat
         obs_evening.lon  = obs.lon
         obs_evening.elev = obs.elev
         if sunset_dt:
-            import calendar
             obs_evening.date = ephem.Date(sunset_utc.strftime("%Y/%m/%d %H:%M:%S"))
         else:
             obs_evening.date = obs.date
@@ -577,6 +596,8 @@ def get_astronomical_data() -> dict:
         # האם הירח גלוי בתחילת הלילה?
         moon_alt_evening = math.degrees(float(moon_evening.alt))
         moon_visible_evening = moon_alt_evening > 0
+
+        # ── כוכבי לכת – מחושבים ב-19:30 ישראל ──
         planet_defs = [
             ("נוגה ♀",  ephem.Venus),
             ("מאדים ♂", ephem.Mars),
@@ -586,7 +607,7 @@ def get_astronomical_data() -> dict:
         ]
         planets_visible = []
         for name, cls in planet_defs:
-            body    = cls(obs)
+            body    = cls(obs)   # obs.date = 19:30 ישראל
             alt_deg = math.degrees(float(body.alt))
             if alt_deg > 10:
                 az  = math.degrees(float(body.az))
@@ -950,7 +971,7 @@ def generate_message(payload: dict) -> str:
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
 
-🪐 כוכבי לכת נראים הלילה:
+🪐 כוכבי לכת נראים הלילה (מחושב ל-19:30 ישראל):
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}
 
 🛸 מעברי תחנות חלל (ISS / טיאנגונג):
@@ -1194,7 +1215,7 @@ def main():
     cloud_pct           = get_cloud_cover()
     cloud_status, cloud_desc = cloud_label(cloud_pct)
 
-    print("🔭 מחשב נתוני ירח וכוכבים...")
+    print("🔭 מחשב נתוני ירח וכוכבים (ל-19:30 ישראל)...")
     astro = get_astronomical_data()
 
     print("🛸 מחשב מעברי ISS...")

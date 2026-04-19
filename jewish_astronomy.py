@@ -7,6 +7,7 @@ jewish_astronomy.py – מודול אסטרונומיה יהודית
   1. molad=on נוסף לבקשת Hebcal (היה חסר!)
   2. תקופות שמואל נשלפות מ-Hebcal (לא חישוב עצמי שגוי)
   3. בדיקת שבת מדויקת לפי שעת שקיעה, לא רק יום שבוע
+  4. קידוש לבנה – זמן פתיחה מעוגל תמיד ללילה (צאת הכוכבים)
 """
 
 from datetime import datetime, timedelta, date
@@ -70,6 +71,17 @@ def _get_sunset(for_date: date) -> Optional[datetime]:
     return datetime.combine(for_date, datetime.min.time()).replace(
         tzinfo=ISRAEL_TZ
     ).replace(hour=18, minute=30)
+
+
+def _round_to_night(dt: datetime) -> datetime:
+    """
+    קידוש לבנה נעשה תמיד בלילה – לא ביום ולא בבוקר.
+    אם הזמן המחושב נופל בשעות היום (05:00–19:59),
+    מעגל לצאת הכוכבים של אותו ערב (~20:00).
+    """
+    if 5 <= dt.hour < 20:
+        return dt.replace(hour=20, minute=0, second=0, microsecond=0)
+    return dt
 
 
 # ══════════════════════════════════════════
@@ -177,6 +189,10 @@ def get_kiddush_levana_info() -> dict:
             sephardic_open = max(sephardic_open, motzei_tb)
             special_note   = "באב נהוג לברך לאחר מוצאי תשעה באב"
 
+    # ── עיגול ללילה: קידוש לבנה תמיד בלילה ──
+    ashkenaz_open  = _round_to_night(ashkenaz_open)
+    sephardic_open = _round_to_night(sephardic_open)
+
     # בדיקת שבת מדויקת לפי שעת שקיעה
     close_date      = window_close.date()
     shabbat_warning = False
@@ -260,19 +276,19 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
 
     close_str = close.strftime("%d/%m בשעה %H:%M")
     last_str  = last.strftime("%d/%m") if hasattr(last, "strftime") else ""
-    sep_str   = sep.strftime("%d/%m בשעה %H:%M")
-    ash_str   = ash.strftime("%d/%m בשעה %H:%M")
     hours_to_close = (close - now).total_seconds() / 3600
 
-    # קידוש לבנה רק בלילה – אל תציג שעת סגירה שהיא ביום
+    # תצוגת תאריך לילית: "ליל DD/MM"
+    ash_night_str = f"ליל {ash.strftime('%d/%m')}"
+    sep_night_str = f"ליל {sep.strftime('%d/%m')}"
     close_night_str = f"ליל {close.strftime('%d/%m')}"
 
     # ── בקרוב (24 שעות לפני פתיחת אשכנזים) ──
     if now < ash:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
-            f"   בקרוב – קידוש לבנה (אשכנזים): החל מ-{ash_str}\n"
-            f"   בקרוב – ברכת הלבנה (ספרדים): החל מ-{sep_str}"
+            f"   בקרוב – קידוש לבנה (אשכנזים): החל מ{ash_night_str}\n"
+            f"   בקרוב – ברכת הלבנה (ספרדים): החל מ{sep_night_str}"
         )
 
     # ── אשכנזים פתוחים, ספרדים עדיין לא (שתי שורות) ──
@@ -280,7 +296,7 @@ def format_kiddush_levana_message(info: dict) -> Optional[str]:
         return (
             f"🌙 *קידוש לבנה / ברכת הלבנה*\n"
             f"   ✅ קידוש לבנה (אשכנזים): אפשר לברך הלילה\n"
-            f"   ⏳ ברכת הלבנה (ספרדים): החל מ-{sep_str}"
+            f"   ⏳ ברכת הלבנה (ספרדים): החל מ{sep_night_str}"
         )
 
     # שניהם פתוחים – בחר תצוגה לפי כמה זמן נותר

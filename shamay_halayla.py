@@ -1148,12 +1148,13 @@ def build_upcoming_text() -> str:
     events = unique[:4]
 
     # בנה טקסט
+    # כל אירוע יהודי שהוא "מחר" בלועזי מתחיל הלילה בערב — ללא יוצא מן הכלל
     parts = []
     for ev in events:
         d = ev["days_away"]
         ev_day = DAY_NAMES[ev["date"].weekday()]
 
-        if d == 1 and is_daytime and ev["evening_start"]:
+        if d == 1 and is_daytime:
             parts.append(f"הערב *{ev['title']}*")
         elif d == 1:
             parts.append(f"מחר *{ev['title']}*")

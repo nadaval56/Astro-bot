@@ -23,13 +23,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 import requests
 import pytz
-from jewish_astronomy import (
-    get_kiddush_levana_info,
-    format_kiddush_levana_message,
-    get_upcoming_tekufot,
-    format_tekufot_message,
-    get_upcoming_jewish_highlights,
-)
+from kiddush_levana import get_kiddush_levana_text
 
 # ══════════════════════════════════════════
 # קבועים
@@ -134,7 +128,7 @@ def get_jewish_events_today() -> list[str]:
         # יום ל׳ = ראש חודש של החודש הבא, לא הנוכחי
         if jdate["day"] == 30:
             from pyluach import dates as pdates, hebrewcal as pheb
-            hdate = pdates.HebrewDate.today()
+            hdate = pdates.HebrewDate.from_pydate(today)
             if jdate["after_sunset"]:
                 hdate = hdate + 1
             next_month = pheb.Month(hdate.year, hdate.month) + 1
@@ -146,43 +140,11 @@ def get_jewish_events_today() -> list[str]:
     # ── ערב ראש חודש ──
     if jdate["is_erev_rosh_chodesh"]:
         from pyluach import dates as pdates, hebrewcal as pheb
-        hdate = pdates.HebrewDate.today()
+        hdate = pdates.HebrewDate.from_pydate(today)
         if jdate["after_sunset"]:
             hdate = hdate + 1
         next_month = pheb.Month(hdate.year, hdate.month) + 1
         events.append(f"📅 מחר ראש חודש {next_month.month_name(hebrew=True)}")
-
-    # ── קידוש לבנה / ברכת הלבנה ──
-    if jdate["is_last_kiddush_levana"]:
-        events.append("⚠️ הלילה האחרון לקידוש לבנה! (י\"ד בחודש) – אל תחמיצו!")
-    elif jdate["is_kiddush_levana"]:
-        days_left = 14 - jdate["day"]
-        events.append(
-            f"🌙 אנחנו בחלון קידוש לבנה "
-            f"(יום {jdate['day']} ב{jdate['month']}, עוד {days_left} ימים)"
-        )
-
-    # ── שבת מברכים – עדיין מ-Hebcal (pyluach לא מכסה את זה) ──
-    if not is_evening:
-        url = (
-            f"https://www.hebcal.com/hebcal?v=1&cfg=json"
-            f"&maj=on&min=on&mod=on&nx=on&mf=on&ss=on"
-            f"&year={today.year}&month={today.month}"
-            f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
-        )
-        try:
-            data = requests.get(url, timeout=10).json()
-            for item in data.get("items", []):
-                if "mevarchim" in item.get("category", "").lower() or \
-                   "mevarchim" in item.get("title", "").lower():
-                    try:
-                        item_date = date.fromisoformat(item["date"][:10])
-                    except Exception:
-                        continue
-                    if item_date == today:
-                        events.append(f"🙏 שבת מברכים את חודש {jdate['month']}")
-        except Exception:
-            pass
 
     return events
 
@@ -656,12 +618,16 @@ def fix_opening(message: str, payload: dict) -> str:
     """
     Python בלבד – מתקן את שורת הפתיחה לפי שעה.
     ודאי 100%, לא תלוי ב-AI.
+    ראש חודש → "חודש טוב!" (עדיפות עליונה אחרי מוצ"ש)
     """
     now_hour  = datetime.now(ISRAEL_TZ).hour
     is_motzei = payload.get("is_motzei", False)
+    jdate     = payload.get("jdate", {})
 
     if is_motzei:
         correct = "שבוע טוב"
+    elif jdate.get("is_rosh_chodesh", False):
+        correct = "חודש טוב"
     elif now_hour >= 21 or now_hour < 6:
         correct = "לילה טוב"
     elif now_hour >= 17:
@@ -677,7 +643,7 @@ def fix_opening(message: str, payload: dict) -> str:
     rest       = lines[1] if len(lines) > 1 else ""
 
     # בדוק אם הפתיחה נכונה
-    VALID_OPENINGS = ["ערב טוב", "לילה טוב", "צהריים טובים", "שבוע טוב", "מוצאי שבת"]
+    VALID_OPENINGS = ["ערב טוב", "לילה טוב", "צהריים טובים", "שבוע טוב", "מוצאי שבת", "חודש טוב"]
     needs_fix = not any(first_line.startswith(o) for o in VALID_OPENINGS)
     wrong_opening = any(
         first_line.startswith(o) for o in VALID_OPENINGS
@@ -925,33 +891,8 @@ def generate_message(payload: dict) -> str:
     jdate        = payload["jdate"]
     date_str     = payload["date_str"]
 
-    kl_message   = payload.get("kl_message")
-    tekufa_msg   = payload.get("tekufa_msg")
-    upcoming     = payload.get("upcoming", [])
     history_text = payload.get("history_text", "אין היסטוריה.")
     is_motzei    = payload.get("is_motzei", False)
-
-    upcoming_str = ""
-    if upcoming:
-        lines = []
-        now_hour = datetime.now(ISRAEL_TZ).hour
-        for ev in upcoming[:5]:
-            d = ev["days_away"]
-            DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
-            ev_day = DAY_NAMES[ev["date"].weekday()]
-            if d == 1 and now_hour < 17:
-                # ריצת 13:00 – אם האירוע מתחיל בערב זה "הערב" לא "מחר"
-                EVENING_EVENTS = ["יום השואה", "יום הזיכרון", "יום העצמאות",
-                                  "ראש השנה", "יום כיפור", "סוכות", "פסח",
-                                  "שבועות", "פורים", "חנוכה", "ראש חודש"]
-                is_evening_event = any(e in ev["title"] for e in EVENING_EVENTS)
-                when = "הערב" if is_evening_event else "מחר"
-            elif d == 1:
-                when = "מחר"
-            else:
-                when = f"יום {ev_day} ({ev['date'].strftime('%d/%m')})"
-            lines.append(f"  • {when}: {ev['title']}")
-        upcoming_str = "\n".join(lines)
 
     # ══════════════════════════════════════════
     # חלק סטטי – נשמר במטמון (cache_control)
@@ -1005,22 +946,16 @@ def generate_message(payload: dict) -> str:
 ✡️ אירועים יהודיים היום:
 {chr(10).join(j_events) if j_events else "אין אירוע מיוחד הלילה"}
 
-🌙 קידוש לבנה / ברכת הלבנה:
-{kl_message or "לא רלוונטי הלילה"}
-
-🌸 תקופות / היפוכי עונות:
-{tekufa_msg or "אין תקופה קרובה"}
-
-📅 אירועים יהודיים-אסטרונומיים בשבוע הקרוב:
-{upcoming_str or "אין אירועים מיוחדים"}
-
 📜 היום בהיסטוריה (נמצא בחיפוש, כלול בשדה חדשות חלל למעלה):
 
 🗂 היסטוריית הודעות אחרונות:
 {history_text}
 
 📡 חדשות חלל ואסטרונומיה (נאספו בנפרד):
-{payload.get('space_news', 'אין חדשות זמינות')}"""
+{payload.get('space_news', 'אין חדשות זמינות')}
+
+⚠️ חשוב: אל תסיים ב"שאו מרום עיניכם..." – שורת החתימה מתווספת אוטומטית.
+⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית."""
 
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
@@ -1111,6 +1046,121 @@ def send_whatsapp(message: str):
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
+
+
+def build_upcoming_text() -> str:
+    """
+    Python בלבד – בונה שורת אירועים קרובים.
+    לא עובר דרך Opus, כך שבעיות כמו "ערב יום הזיכרון" לא יקרו.
+    """
+    now   = datetime.now(ISRAEL_TZ)
+    today = now.date()
+    is_daytime = now.hour < 17
+
+    DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+
+    # אירועים מ-Hebcal (חגים, ימי זיכרון, ראש חודש) – קריאה אחת-שתיים בלבד
+    events = []
+    end_date = today + timedelta(days=7)
+
+    months_to_check = {(today.year, today.month)}
+    if end_date.month != today.month:
+        months_to_check.add((end_date.year, end_date.month))
+
+    for year, month in months_to_check:
+        url = (
+            f"https://www.hebcal.com/hebcal?v=1&cfg=json"
+            f"&maj=on&min=on&mod=on&nx=on"
+            f"&year={year}&month={month}"
+            f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
+        )
+        try:
+            items = requests.get(url, timeout=10).json().get("items", [])
+            for item in items:
+                try:
+                    item_date = date.fromisoformat(item["date"][:10])
+                except Exception:
+                    continue
+                days_away = (item_date - today).days
+                if not (1 <= days_away <= 7):
+                    continue
+                cat = item.get("category", "")
+                if cat in {"holiday", "roshchodesh"}:
+                    heb = item.get("hebrew", item.get("title", ""))
+                    events.append({"date": item_date, "days_away": days_away, "title": heb})
+        except Exception:
+            pass
+
+    events.sort(key=lambda x: x["days_away"])
+
+    if not events:
+        return ""
+
+    # סנן כפילויות
+    seen = set()
+    unique = []
+    for ev in events:
+        if ev["title"] not in seen:
+            seen.add(ev["title"])
+            unique.append(ev)
+    events = unique[:4]
+
+    # בנה טקסט
+    parts = []
+    for ev in events:
+        d = ev["days_away"]
+        ev_day = DAY_NAMES[ev["date"].weekday()]
+
+        # אירועים שמתחילים בערב: "הערב" (ריצת יום, מחר = הערב)
+        EVENING_EVENTS = ["יום השואה", "יום הזיכרון", "יום העצמאות",
+                          "ראש השנה", "יום כיפור", "סוכות", "פסח",
+                          "שבועות", "פורים", "חנוכה"]
+        is_evening_start = any(e in ev["title"] for e in EVENING_EVENTS)
+
+        if d == 1 and is_daytime and is_evening_start:
+            parts.append(f"הערב *{ev['title']}*")
+        elif d == 1:
+            parts.append(f"מחר *{ev['title']}*")
+        else:
+            parts.append(f"*{ev['title']}* ביום {ev_day}")
+
+    return "השבוע: " + ", ".join(parts) + "." if parts else ""
+
+
+def build_footer(payload: dict) -> str:
+    """
+    בונה את התוספת שמודבקת אחרי הודעת Opus:
+    1. אירועים קרובים (אם יש)
+    2. קידוש לבנה (אם רלוונטי)
+    3. שורת חתימה
+    הכל Python – ללא AI.
+    """
+    lines = []
+
+    # אירועים קרובים
+    upcoming = build_upcoming_text()
+    if upcoming:
+        lines.append(upcoming)
+
+    # קידוש לבנה
+    kl = get_kiddush_levana_text()
+    if kl:
+        lines.append("")
+        lines.append(kl)
+
+    # חתימה
+    lines.append("")
+    lines.append("שאו מרום עיניכם וראו מי ברא אלה 🌌")
+
+    return "\n".join(lines)
+
+
+def strip_closing_line(message: str) -> str:
+    """מסיר את שורת החתימה אם Opus הוסיף אותה בכל זאת"""
+    lines = message.rstrip().split("\n")
+    while lines and ("שאו מרום" in lines[-1] or lines[-1].strip() == ""):
+        lines.pop()
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════
@@ -1256,31 +1306,20 @@ def main():
         print(f"  {e}")
     print("─"*40 + "\n")
 
-    print("🌙 מחשב קידוש לבנה / ברכת הלבנה...")
-    kl_info    = get_kiddush_levana_info()
-    kl_message = format_kiddush_levana_message(kl_info)
-
-    print("🌸 בודק תקופות קרובות...")
-    tekufot     = get_upcoming_tekufot(days_ahead=7)
-    tekufa_msg  = format_tekufot_message(tekufot)
-
-    print("📅 מחפש אירועים יהודיים בשבוע הקרוב...")
-    upcoming    = get_upcoming_jewish_highlights(days_ahead=7)
+    print("🌙 קידוש לבנה...")
+    kl_text = get_kiddush_levana_text()
+    if kl_text:
+        print(f"  {kl_text.split(chr(10))[0]}")
+    else:
+        print("  (לא רלוונטי היום)")
 
     date_str   = now.strftime("%d/%m/%Y")
 
     print("📡 מחפש חדשות חלל ואסטרונומיה...")
     # בונה הקשר יהודי-אסטרונומי לקריאת החיפוש
     jewish_context_parts = []
-    if kl_message:
-        jewish_context_parts.append(kl_message)
-    if tekufa_msg:
-        jewish_context_parts.append(tekufa_msg)
     if j_events:
         jewish_context_parts.extend(j_events)
-    if upcoming:
-        for ev in upcoming[:3]:
-            jewish_context_parts.append(f"בעוד {ev['days_away']} ימים: {ev['title']}")
     jewish_context = "\n".join(jewish_context_parts)
     space_news = gather_space_news(date_str, jewish_context)
     print("\n" + "─"*40)
@@ -1302,9 +1341,6 @@ def main():
         "iss":           iss,
         "jewish_events": j_events,
         "jdate":         jdate,
-        "kl_message":    kl_message,
-        "tekufa_msg":    tekufa_msg,
-        "upcoming":      upcoming,
         "history_text":  history_text,
         "space_news":    space_news,
         "is_motzei":     is_motzei,
@@ -1325,6 +1361,13 @@ def main():
 
     print("✍️ מגיה עברית...")
     message = proofread_hebrew(message)
+
+    print("🔧 מסיר חתימה (אם Opus הוסיף)...")
+    message = strip_closing_line(message)
+
+    print("📎 מוסיף תוספת קבועה (אירועים + קידוש לבנה + חתימה)...")
+    footer = build_footer(payload)
+    message = message + "\n\n" + footer
 
     print("\n" + "═"*50)
     print(message)

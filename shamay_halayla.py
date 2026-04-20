@@ -71,9 +71,11 @@ def get_jewish_date_info() -> dict:
     from pyluach import dates as pdates, hebrewcal
 
     now          = datetime.now(ISRAEL_TZ)
+    today_il     = now.date()  # תאריך ישראלי מפורש, לא date.today() של המערכת
     after_sunset = now.hour >= 17  # ריצת 21:00 = תמיד אחרי שקיעה
 
-    hdate = pdates.HebrewDate.today()
+    hdate = pdates.HebrewDate.from_pydate(today_il)
+    print(f"📅 pyluach: {today_il} → {hdate.hebrew_day()} {hdate.month_name(hebrew=True)}")
     if after_sunset:
         hdate = hdate + 1  # ריצת 21:00 → יום עברי הבא תמיד
 
@@ -111,7 +113,7 @@ def get_jewish_events_today() -> list[str]:
     is_evening = now.hour >= 17
 
     jdate  = get_jewish_date_info()
-    hdate  = pdates.HebrewDate.today()
+    hdate  = pdates.HebrewDate.from_pydate(today)
     if is_evening:
         hdate = hdate + 1
 
@@ -690,6 +692,29 @@ def fix_opening(message: str, payload: dict) -> str:
         new_first = f"{correct}{emoji}"
         print(f"🔧 fix_opening: '{first_line.strip()}' → '{new_first}'")
         return new_first + "\n" + rest
+
+    return message
+
+
+def fix_date_line(message: str, payload: dict) -> str:
+    """
+    Python בלבד – כופה את שורת התאריך הנכונה בשורה השנייה.
+    Opus לפעמים טועה בהעתקת התאריך העברי, אז אנחנו לא סומכים עליו.
+    """
+    jdate    = payload["jdate"]
+    now      = datetime.now(ISRAEL_TZ)
+    # פורמט: 20.4.2026 | ג׳ אייר תשפ״ו
+    correct_date = f"{now.day}.{now.month}.{now.year} | {jdate['hebrew_display']}"
+
+    lines = message.split("\n")
+    if len(lines) < 2:
+        return message
+
+    old_date = lines[1].strip()
+    if old_date != correct_date:
+        print(f"🔧 fix_date_line: '{old_date}' → '{correct_date}'")
+        lines[1] = correct_date
+        return "\n".join(lines)
 
     return message
 
@@ -1291,6 +1316,9 @@ def main():
 
     print("🕐 תיקון פתיחה לפי שעה...")
     message = fix_opening(message, payload)
+
+    print("📅 תיקון שורת תאריך...")
+    message = fix_date_line(message, payload)
 
     print("🔍 בקרה לוגית...")
     message = quality_check(message, payload)

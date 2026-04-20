@@ -1048,14 +1048,13 @@ def send_whatsapp(message: str):
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
 
 
-def build_upcoming_text() -> str:
+def build_upcoming_text(now: datetime) -> str:
     """
     Python בלבד – בונה שורת אירועים קרובים.
-    לא עובר דרך Opus, כך שבעיות כמו "ערב יום הזיכרון" לא יקרו.
+    מקבל את now מ-main() – לא מחשב לבד כדי לא לסחוף לאחר 17:00.
     """
-    now   = datetime.now(ISRAEL_TZ)
     today = now.date()
-    is_daytime = now.hour < 17
+    is_daytime = now.hour < 17  # זמן הריצה המקורי, לא הזמן הנוכחי
 
     DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
@@ -1148,16 +1147,14 @@ def build_upcoming_text() -> str:
     events = unique[:4]
 
     # בנה טקסט
-    # כל אירוע יהודי שהוא "מחר" בלועזי מתחיל הלילה בערב — ללא יוצא מן הכלל
+    # כל אירוע יהודי שהוא "מחר" בלועזי מתחיל הלילה — תמיד, ללא תלות בשעת הריצה
     parts = []
     for ev in events:
         d = ev["days_away"]
         ev_day = DAY_NAMES[ev["date"].weekday()]
 
-        if d == 1 and is_daytime:
+        if d == 1:
             parts.append(f"הערב *{ev['title']}*")
-        elif d == 1:
-            parts.append(f"מחר *{ev['title']}*")
         else:
             parts.append(f"*{ev['title']}* ביום {ev_day}")
 
@@ -1170,12 +1167,11 @@ def build_footer(payload: dict) -> str:
     1. אירועים קרובים (אם יש)
     2. קידוש לבנה (אם רלוונטי)
     3. שורת חתימה
-    הכל Python – ללא AI.
     """
+    now = payload["run_time"]   # זמן הריצה המקורי מ-main()
     lines = []
 
-    # אירועים קרובים
-    upcoming = build_upcoming_text()
+    upcoming = build_upcoming_text(now)
     if upcoming:
         lines.append(upcoming)
 
@@ -1370,6 +1366,7 @@ def main():
     # ── יצירת הטקסט ─────────────────────
     print("🤖 Claude מייצר הודעה בעברית...")
     payload = {
+        "run_time":      now,           # זמן הריצה המקורי – לא ישתנה
         "date_str":      date_str,
         "cloud_pct":     cloud_pct,
         "cloud_status":  cloud_status,

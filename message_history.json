@@ -68,5 +68,15 @@
     "jewish": "יום זיכרון ביום שלישי, יום העצמאות ברביעי",
     "this_day_history": null,
     "_message_length": 119
+  },
+  "2026-04-20": {
+    "weather": "עננות חלקית, סיכוי לחלונות פתוחים",
+    "moon": "סהר דק 15%, שוקע 23:01, שמיים חשוכים",
+    "planets": "נוגה במערב מינוס 3.8, צדק 68 מעלות",
+    "iss": null,
+    "space_news": "Blue Origin שיגרה New Glenn, לוויין GPS III מחר",
+    "jewish": "יום הזיכרון מחר, יום העצמאות ברביעי, קידוש לבנה נפתח",
+    "this_day_history": null,
+    "_message_length": 129
   }
 }

@@ -1059,8 +1059,32 @@ def build_upcoming_text() -> str:
 
     DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
-    # אירועים מ-Hebcal (חגים, ימי זיכרון, ראש חודש) – קריאה אחת-שתיים בלבד
-    # &min=on הוסר – לא רוצים אירועים מינוריים (יום הרצל, יום ז'בוטינסקי...)
+    # אירועים מ-Hebcal – whitelist קשיח במקום סינון לפי קטגוריה
+    # רק אירועים שאנחנו רוצים להזכיר, לפי שם אנגלי של Hebcal
+    WANTED_EVENTS = {
+        # מודרניים – מתחילים בערב (evening_start=True)
+        "Yom HaShoah":          ("יום השואה",        True),
+        "Yom HaZikaron":        ("יום הזיכרון",      True),
+        "Yom HaAtzma'ut":       ("יום העצמאות",      True),
+        # חגים – מתחילים בערב
+        "Erev Pesach":          ("ערב פסח",          True),
+        "Pesach I":             ("פסח",              True),
+        "Pesach VII":           ("שביעי של פסח",     True),
+        "Erev Shavuot":         ("ערב שבועות",       True),
+        "Shavuot":              ("שבועות",            True),
+        "Erev Rosh Hashana":    ("ערב ראש השנה",     True),
+        "Rosh Hashana":         ("ראש השנה",         True),
+        "Erev Yom Kippur":      ("ערב יום כיפור",    True),
+        "Yom Kippur":           ("יום כיפור",        True),
+        "Erev Sukkot":          ("ערב סוכות",        True),
+        "Sukkot I":             ("סוכות",             True),
+        "Shmini Atzeret":       ("שמיני עצרת",       True),
+        "Chanukah: 1 Candle":   ("חנוכה",            True),
+        "Purim":                ("פורים",             True),
+        # ראש חודש – גם מתחיל בערב
+        "Rosh Chodesh":         (None,               True),   # None = השתמש בעברית של Hebcal
+    }
+
     events = []
     end_date = today + timedelta(days=7)
 
@@ -1071,7 +1095,7 @@ def build_upcoming_text() -> str:
     for year, month in months_to_check:
         url = (
             f"https://www.hebcal.com/hebcal?v=1&cfg=json"
-            f"&maj=on&mod=on&nx=on"
+            f"&maj=on&mod=on&nx=on&mf=on"
             f"&year={year}&month={month}"
             f"&c=on&geo=geoname&geonameid={GEONAMEID}&M=on&s=on"
         )
@@ -1086,14 +1110,25 @@ def build_upcoming_text() -> str:
                 if not (1 <= days_away <= 7):
                     continue
                 cat = item.get("category", "")
-                if cat in {"holiday", "roshchodesh"}:
-                    heb = item.get("hebrew", item.get("title", ""))
-                    eng = item.get("title", "")
+                if cat not in {"holiday", "roshchodesh"}:
+                    continue
+
+                eng_title = item.get("title", "")
+                heb_title = item.get("hebrew", eng_title)
+
+                # חפש התאמה ב-whitelist
+                matched = None
+                for pattern, (display, evening) in WANTED_EVENTS.items():
+                    if eng_title.startswith(pattern):
+                        matched = (display or heb_title, evening)
+                        break
+
+                if matched:
                     events.append({
-                        "date": item_date,
-                        "days_away": days_away,
-                        "title": heb,
-                        "title_en": eng,
+                        "date":          item_date,
+                        "days_away":     days_away,
+                        "title":         matched[0],
+                        "evening_start": matched[1],
                     })
         except Exception:
             pass
@@ -1118,16 +1153,7 @@ def build_upcoming_text() -> str:
         d = ev["days_away"]
         ev_day = DAY_NAMES[ev["date"].weekday()]
 
-        # אירועים שמתחילים בערב: "הערב" (ריצת יום, מחר = הערב)
-        # מתאימים לפי שם אנגלי של Hebcal – אמין יותר מעברית עם ניקוד
-        EVENING_EVENTS_EN = [
-            "Yom HaShoah", "Yom HaZikaron", "Yom HaAtzma",
-            "Rosh Hashana", "Yom Kippur", "Sukkot", "Pesach",
-            "Shavuot", "Purim", "Chanukah", "Erev ",
-        ]
-        is_evening_start = any(e in ev.get("title_en", "") for e in EVENING_EVENTS_EN)
-
-        if d == 1 and is_daytime and is_evening_start:
+        if d == 1 and is_daytime and ev["evening_start"]:
             parts.append(f"הערב *{ev['title']}*")
         elif d == 1:
             parts.append(f"מחר *{ev['title']}*")

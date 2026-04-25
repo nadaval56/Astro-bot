@@ -61,6 +61,10 @@ def get_jewish_date_info() -> dict:
     """
     מחזיר את התאריך העברי הנכון באמצעות pyluach – חישוב מקומי, ללא API.
     pyluach משנה תאריך עברי בחצות. אחרי שקיעה (17:00+) מוסיפים יום.
+
+    *** תיקון: hebrew_display תמיד ללא "אור ל" ***
+    ריצת 14:00 → תאריך לועזי היום + תאריך עברי היום
+    ריצת 21:00 → תאריך לועזי היום + תאריך עברי מחר (hdate+1, אבל ללא קישוט)
     """
     from pyluach import dates as pdates, hebrewcal
 
@@ -77,11 +81,8 @@ def get_jewish_date_info() -> dict:
     hm = hdate.month_name(hebrew=True)
     hy = hebrewcal.Year(hdate.year).year_string()
 
-    # תצוגה
-    if after_sunset:
-        hebrew_display = f"אור ל-{hdate.hebrew_day()} {hm} {hy}"
-    else:
-        hebrew_display = f"{hdate.hebrew_day()} {hm} {hy}"
+    # *** תיקון: תמיד ללא "אור ל" – תאריך עברי בלבד ***
+    hebrew_display = f"{hdate.hebrew_day()} {hm} {hy}"
 
     return {
         "day":                    hd,
@@ -539,6 +540,11 @@ def get_astronomical_data() -> dict:
 
         moon_evening = ephem.Moon(obs_evening)
 
+        # *** תיקון: חשב גובה הירח בשקיעה לפני קריאות next_rising/next_setting ***
+        # קריאות אלו מקדמות את obs_evening.date פנימית ומשנות את moon_evening.alt
+        moon_alt_evening = math.degrees(float(moon_evening.alt))
+        moon_visible_evening = moon_alt_evening > 0
+
         # מצא: מתי הירח עולה ומתי שוקע במהלך חלון 20:00-02:00
         moon_rise = None
         moon_set  = None
@@ -556,10 +562,6 @@ def get_astronomical_data() -> dict:
                 moon_set = set_dt.strftime("%H:%M")
         except Exception:
             pass
-
-        # האם הירח גלוי בתחילת הלילה?
-        moon_alt_evening = math.degrees(float(moon_evening.alt))
-        moon_visible_evening = moon_alt_evening > 0
 
         # ── כוכבי לכת – מחושבים ב-19:30 ישראל ──
         planet_defs = [
@@ -664,25 +666,31 @@ def fix_opening(message: str, payload: dict) -> str:
 
 def fix_date_line(message: str, payload: dict) -> str:
     """
-    Python בלבד – כופה את שורת התאריך הנכונה בשורה השנייה.
-    Opus לפעמים טועה בהעתקת התאריך העברי, אז אנחנו לא סומכים עליו.
+    Python בלבד – כופה שורת תאריך נכונה אחת בשורה השנייה.
+    *** תיקון: מסיר כל שורות תאריך נוספות (כפילויות שהוסיף Opus) ***
     """
-    jdate    = payload["jdate"]
-    now      = datetime.now(ISRAEL_TZ)
-    # פורמט: 20.4.2026 | ג׳ אייר תשפ״ו
+    import re
+
+    jdate = payload["jdate"]
+    now   = datetime.now(ISRAEL_TZ)
     correct_date = f"{now.day}.{now.month}.{now.year} | {jdate['hebrew_display']}"
 
     lines = message.split("\n")
-    if len(lines) < 2:
+    if len(lines) < 1:
         return message
 
-    old_date = lines[1].strip()
-    if old_date != correct_date:
-        print(f"🔧 fix_date_line: '{old_date}' → '{correct_date}'")
-        lines[1] = correct_date
-        return "\n".join(lines)
+    # מצא ומחק את כל שורות התאריך הקיימות (dd.mm.yyyy | ...)
+    date_pattern = re.compile(r'^\d{1,2}\.\d{1,2}\.\d{4}\s*\|')
+    filtered = [l for l in lines if not date_pattern.match(l.strip())]
 
-    return message
+    # הכנס שורת תאריך נכונה אחרי שורה ראשונה (הפתיחה)
+    if len(filtered) >= 1:
+        filtered.insert(1, correct_date)
+
+    result = "\n".join(filtered)
+    if result != message:
+        print(f"🔧 fix_date_line: → '{correct_date}'")
+    return result
 
 
 def quality_check(message: str, payload: dict) -> str:
@@ -787,11 +795,13 @@ def proofread_hebrew(message: str) -> str:
         return message
 
 
-def gather_space_news(date_str: str, jewish_context: str = "") -> str:
+def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list = None) -> str:
     """
     קריאה 1 – "עיתונאי חלל":
     תפקיד אחד בלבד: חפש ובחר מה מעניין הלילה.
     מחזיר עובדות גולמיות בלי עיצוב, בלי כללי כתיבה.
+
+    *** תיקון: מקבל רשימת חדשות שכוסו לאחרונה ומנחה לא לחזור עליהן ***
     """
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
@@ -804,12 +814,21 @@ def gather_space_news(date_str: str, jewish_context: str = "") -> str:
 {jewish_context}
 """ if jewish_context else ""
 
+    # *** תיקון: בנה סעיף "נושאים שכוסו לאחרונה" ***
+    recent_section = ""
+    if recent_news:
+        items = "\n".join(f"• {n}" for n in recent_news if n)
+        recent_section = f"""
+נושאים שכוסו לאחרונה בהודעות קודמות – אל תחזור עליהם, חפש משהו אחר:
+{items}
+"""
+
     body = {
         "model":      CLAUDE_MODEL,
         "max_tokens": 800,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "messages": [{"role": "user", "content": f"""אתה עיתונאי חלל. המשימה שלך היא לחפש ולסנן בלבד – לא לכתוב הודעה.
-{jewish_section}
+{jewish_section}{recent_section}
 חפש באינטרנט לתאריך {date_str}:
 1. חדשות חלל בולטות השבוע – תגליות ג'יימס וב/האבל, שיגורים מיוחדים, גילויים חדשים
 2. אירועים אסטרונומיים – שביטים נראים, ליקויים, מטר מטאורים פעיל, Starlink מישראל
@@ -1348,13 +1367,20 @@ def main():
 
     date_str   = now.strftime("%d/%m/%Y")
 
+    # *** תיקון: חלץ חדשות שכוסו לאחרונה למניעת חזרות ***
+    recent_news = [
+        v.get("space_news", "")
+        for v in sorted(history.values(), key=lambda x: x.get("_message_length", 0))[-5:]
+        if v.get("space_news")
+    ]
+
     print("📡 מחפש חדשות חלל ואסטרונומיה...")
     # בונה הקשר יהודי-אסטרונומי לקריאת החיפוש
     jewish_context_parts = []
     if j_events:
         jewish_context_parts.extend(j_events)
     jewish_context = "\n".join(jewish_context_parts)
-    space_news = gather_space_news(date_str, jewish_context)
+    space_news = gather_space_news(date_str, jewish_context, recent_news)
     print("\n" + "─"*40)
     print("📡 חדשות שנאספו:")
     print(space_news)

@@ -99,22 +99,33 @@ def get_jewish_date_info() -> dict:
 
 def get_jewish_events_today() -> list[str]:
     """
-    שולף אירועים יהודיים – חגים מ-pyluach, זמנים מ-Hebcal.
+    שולף אירועים יהודיים של *הלילה הקרוב* מ-pyluach.
+
+    *** עקרון מנחה: הבוט מדבר על "הלילה" – אז גם רשימת האירועים תמיד
+        משויכת לתאריך העברי של הלילה הקרוב, לא של היום העברי שכבר חולף. ***
+
+    כך:
+      • ב-14:00 ביום *לפני* ל"ג בעומר → מתריע ("הלילה ל"ג בעומר") ✓
+      • ב-14:00 ביום *של* ל"ג בעומר (אחרי המדורות שכבר היו) → לא מזכיר ✓
+      • ב-14:00 בערב ר"ח → "ראש חודש X" (כי הלילה כבר ר"ח) ✓
+      • ב-21:00 בכל מקרה → tonight = pyluach(today)+1 בכל מקרה ✓
+
+    הברכה "חודש טוב" בכותרת ההודעה (fix_opening) ממשיכה לעבוד מול jdate
+    הנוכחי – זה נכון לברכה (הברכה היא לעכשיו, האירועים הם ללילה).
     """
     from pyluach import dates as pdates, hebrewcal as pheb
 
-    now        = datetime.now(ISRAEL_TZ)
-    today      = now.date()
-    is_evening = now.hour >= 17
+    now   = datetime.now(ISRAEL_TZ)
+    today = now.date()
 
-    jdate  = get_jewish_date_info()
-    hdate  = pdates.HebrewDate.from_pydate(today)
-    if is_evening:
-        hdate = hdate + 1
+    # תמיד תאריך הלילה הקרוב = היום העברי הבא
+    # ב-14:00: pyluach(today)=18 אייר → +1 = 19 אייר (הלילה הקרוב)
+    # ב-21:00: pyluach(today)=18 אייר → +1 = 19 אייר (הלילה הזה כבר)
+    hdate = pdates.HebrewDate.from_pydate(today) + 1
 
     events = []
 
-    # ── חג / יו"ט מ-pyluach ──
+    # ── חג / יו"ט / ל"ג בעומר / פסח שני / יוה"ע וכו' מ-pyluach ──
     holiday = hdate.holiday(hebrew=True, israel=True)
     if holiday:
         events.append(f"✡️ {holiday}")
@@ -124,28 +135,19 @@ def get_jewish_events_today() -> list[str]:
     if fast:
         events.append(f"🕯️ {fast}")
 
-    # ── ראש חודש ──
-    if jdate["is_rosh_chodesh"]:
-        # יום ל׳ = ראש חודש של החודש הבא, לא הנוכחי
-        if jdate["day"] == 30:
-            from pyluach import dates as pdates, hebrewcal as pheb
-            hdate = pdates.HebrewDate.from_pydate(today)
-            if jdate["after_sunset"]:
-                hdate = hdate + 1
+    # ── ראש חודש (אם הלילה הוא יום 1 או 30) ──
+    # יום 30 בחודש = יום ראשון של ר"ח (מכריז על החודש הבא)
+    # יום 1 בחודש = יום שני של ר"ח (או יחיד, אם החודש הקודם בן 29)
+    # מקרה ערב ר"ח (hdate.day=30 כשהיום העברי הנוכחי הוא 29) נופל לכאן באופן טבעי –
+    # האירוע הוא "ראש חודש X" כי הלילה ר"ח כבר מתחיל.
+    if hdate.day in (1, 30):
+        if hdate.day == 30:
+            # יום ל׳ של חודש = ר"ח של החודש שאחריו
             next_month = pheb.Month(hdate.year, hdate.month) + 1
             rc_month = next_month.month_name(hebrew=True)
         else:
-            rc_month = jdate["month"]
+            rc_month = hdate.month_name(hebrew=True)
         events.append(f"🌑 ראש חודש {rc_month} – חודש טוב!")
-
-    # ── ערב ראש חודש ──
-    if jdate["is_erev_rosh_chodesh"]:
-        from pyluach import dates as pdates, hebrewcal as pheb
-        hdate = pdates.HebrewDate.from_pydate(today)
-        if jdate["after_sunset"]:
-            hdate = hdate + 1
-        next_month = pheb.Month(hdate.year, hdate.month) + 1
-        events.append(f"📅 מחר ראש חודש {next_month.month_name(hebrew=True)}")
 
     return events
 
@@ -936,6 +938,21 @@ def generate_message(payload: dict) -> str:
     current_time = now_il.strftime("%H:%M")
     is_daytime   = now_il.hour < 17
 
+    # מצב הירח – שורה אחת ברורה לפי 4 מצבים אפשריים.
+    # מחליפה שלוש שורות שיצרו ניסוחים מטעים כמו "שקע לפני החשיכה"
+    # (גם כשהירח שקע בבוקר, 15 שעות לפני, ויזרח שוב בלילה).
+    _mr = astro.get('moon_rise')
+    _ms = astro.get('moon_set')
+    _mv = astro.get('moon_visible_evening', False)
+    if _mv:
+        moon_status = "🌙 גלוי כבר בתחילת הלילה" + (
+            f", ישקע ב-{_ms}" if _ms else " ויישאר גלוי כל הלילה"
+        )
+    elif _mr:
+        moon_status = f"🌙 יזרח ב-{_mr} – עד אז השמיים חשוכים"
+    else:
+        moon_status = "🌙 לא יהיה גלוי כל הלילה"
+
     DYNAMIC_DATA = f"""═══════════════════════════════
 נתוני הערב — {date_str} | שעה: {current_time}
 {'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei else ''}
@@ -949,9 +966,7 @@ def generate_message(payload: dict) -> str:
    הערכה: {cloud_desc}
 
 🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
-   {'🌙 גלוי בתחילת הלילה' if astro.get('moon_visible_evening') else '🌙 לא גלוי בתחילת הלילה (שקע לפני החשיכה)'}
-   {('🌙 יזרח הלילה ב-' + astro['moon_rise'] + ' (השמיים חשוכים עד אז)') if astro.get('moon_rise') else '🌙 לא יזרח בשעות הלילה'}
-   {('🌙 ישקע הלילה ב-' + astro['moon_set']) if astro.get('moon_set') else ''}
+   {moon_status}
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}

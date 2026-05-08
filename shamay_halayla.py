@@ -136,13 +136,8 @@ def get_jewish_events_today() -> list[str]:
         events.append(f"🕯️ {fast}")
 
     # ── ראש חודש (אם הלילה הוא יום 1 או 30) ──
-    # יום 30 בחודש = יום ראשון של ר"ח (מכריז על החודש הבא)
-    # יום 1 בחודש = יום שני של ר"ח (או יחיד, אם החודש הקודם בן 29)
-    # מקרה ערב ר"ח (hdate.day=30 כשהיום העברי הנוכחי הוא 29) נופל לכאן באופן טבעי –
-    # האירוע הוא "ראש חודש X" כי הלילה ר"ח כבר מתחיל.
     if hdate.day in (1, 30):
         if hdate.day == 30:
-            # יום ל׳ של חודש = ר"ח של החודש שאחריו
             next_month = pheb.Month(hdate.year, hdate.month) + 1
             rc_month = next_month.month_name(hebrew=True)
         else:
@@ -211,15 +206,46 @@ def _azimuth_to_hebrew(az: float) -> str:
 
 def _get_satellite_passes(norad_id: int, name: str, ts, obs) -> list[dict]:
     """מחשב מעברים של לוויין נתון מעל נקודת התצפית"""
-    try:
-        tle_resp = requests.get(
-            f"https://celestrak.org/satcat/tle.php?CATNR={norad_id}", timeout=10
-        )
-        lines = [l.strip() for l in tle_resp.text.strip().splitlines() if l.strip()]
-        if len(lines) < 2:
-            return []
-        line1, line2 = lines[-2], lines[-1]
 
+    # ══════════════════════════════════════════
+    # שליפת TLE – עם fallback ובדיקת תקינות
+    # תיקון: URL מודרני (gp.php) במקום satcat/tle.php שהחזיר שגיאות בשקט
+    # ══════════════════════════════════════════
+    TLE_URLS = [
+        f"https://celestrak.org/NORAD/elements/gp.php?CATNR={norad_id}&FORMAT=TLE",
+        f"https://celestrak.org/satcat/tle.php?CATNR={norad_id}",  # legacy fallback
+    ]
+
+    line1 = line2 = None
+    for url in TLE_URLS:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                print(f"  ⚠️ {name} TLE: HTTP {r.status_code} מ-{url}")
+                continue
+            lines = [l.strip() for l in r.text.strip().splitlines() if l.strip()]
+            if len(lines) < 2:
+                print(f"  ⚠️ {name} TLE: תשובה קצרה מדי ({len(lines)} שורות)")
+                continue
+            l1, l2 = lines[-2], lines[-1]
+            # בדיקת תקינות – TLE חייב להתחיל ב-"1 " / "2 "
+            if not (l1.startswith("1 ") and l2.startswith("2 ")):
+                print(f"  ⚠️ {name} TLE: תוכן לא תקין ('{l1[:20]}')")
+                continue
+            line1, line2 = l1, l2
+            print(f"  ✅ {name} TLE נשלף (epoch: {line1[18:32].strip()})")
+            break
+        except Exception as e:
+            print(f"  ⚠️ {name} TLE שגיאה ({url}): {e}")
+
+    if not line1:
+        print(f"  ❌ {name}: כל מקורות ה-TLE נכשלו – מדלג")
+        return []
+
+    # ══════════════════════════════════════════
+    # חישוב מעברים
+    # ══════════════════════════════════════════
+    try:
         from skyfield.api import EarthSatellite
         sat = EarthSatellite(line1, line2, name, ts)
 
@@ -939,8 +965,6 @@ def generate_message(payload: dict) -> str:
     is_daytime   = now_il.hour < 17
 
     # מצב הירח – שורה אחת ברורה לפי 4 מצבים אפשריים.
-    # מחליפה שלוש שורות שיצרו ניסוחים מטעים כמו "שקע לפני החשיכה"
-    # (גם כשהירח שקע בבוקר, 15 שעות לפני, ויזרח שוב בלילה).
     _mr = astro.get('moon_rise')
     _ms = astro.get('moon_set')
     _mv = astro.get('moon_visible_evening', False)
@@ -1093,7 +1117,6 @@ def build_upcoming_text(now: datetime) -> str:
     DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
     # אירועים מ-Hebcal – whitelist קשיח במקום סינון לפי קטגוריה
-    # רק אירועים שאנחנו רוצים להזכיר, לפי שם אנגלי של Hebcal
     WANTED_EVENTS = {
         # מודרניים – מתחילים בערב (evening_start=True)
         "Yom HaShoah":          ("יום השואה",        True),
@@ -1181,7 +1204,6 @@ def build_upcoming_text(now: datetime) -> str:
     events = unique[:4]
 
     # בנה טקסט
-    # כל אירוע יהודי שהוא "מחר" בלועזי מתחיל הלילה — תמיד, ללא תלות בשעת הריצה
     parts = []
     for ev in events:
         d = ev["days_away"]
@@ -1323,16 +1345,12 @@ def main():
 
     if hour < 17:
         # ── ריצת 13:00 ──
-        # שלח אם לא שבת/חג עכשיו
-        # (הדלקת נרות בישראל לא יכולה להיות לפני ~15:30)
         if is_shabbat_or_yomtov_now(daytime_run=True):
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
 
     else:
         # ── ריצת 21:00 ──
-        # שלח אם: לא נשלח היום, ולא שבת/חג עכשיו
-
         if was_sent_today(history) and os.environ.get("FORCE_SEND", "false").lower() != "true":
             print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
             sys.exit(0)

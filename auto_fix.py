@@ -27,7 +27,7 @@ def fix_prefix_before_bold(text: str) -> str:
     # תבנית: אות שירות + * + תוכן + *
     # למשל: ו*נוגה* → *ונוגה*
     prefix_letters = "והבכלמש"
-    pattern = rf'([{prefix_letters}])(\*[^*\n]+\*)'
+    pattern = rf'(?<![א-ת])([{prefix_letters}])(\*[^*\n]+\*)'
     def replacer(m):
         letter  = m.group(1)
         bold    = m.group(2)          # *תוכן*

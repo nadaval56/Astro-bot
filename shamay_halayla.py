@@ -1200,8 +1200,15 @@ def send_whatsapp(message: str):
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
 
 
-def build_upcoming_text(now: datetime) -> str:
+def build_upcoming_text(now: datetime, is_motzei: bool = False) -> str:
     today = now.date()
+
+    # גבול "השבוע" – שבת הקרובה (Sun-Sat). במוצאי שבת/חג השבוע
+    # החדש כבר התחיל, אז "השבוע" כולל את 7 הימים הבאים עד שבת הבאה.
+    days_to_saturday = (5 - today.weekday()) % 7
+    if is_motzei and days_to_saturday == 0:
+        days_to_saturday = 7
+    end_of_this_week = today + timedelta(days=days_to_saturday)
 
     DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
@@ -1286,27 +1293,30 @@ def build_upcoming_text(now: datetime) -> str:
             unique.append(ev)
     events = unique[:4]
 
-    parts = []
+    this_week, next_week = [], []
     for ev in events:
         d = ev["days_away"]
         ev_day = DAY_NAMES[ev["date"].weekday()]
-        if d == 1:
-            parts.append(f"הערב *{ev['title']}*")
-        elif d == 7:
-            # אותו שם יום כמו היום – הבהרה שזה בעוד שבוע, לא היום
-            date_str = f"{ev['date'].day}.{ev['date'].month}"
-            parts.append(f"*{ev['title']}* בעוד שבוע ({date_str})")
+        text = f"הערב *{ev['title']}*" if d == 1 else f"*{ev['title']}* ביום {ev_day}"
+        if ev["date"] <= end_of_this_week:
+            this_week.append(text)
         else:
-            parts.append(f"*{ev['title']}* ביום {ev_day}")
+            next_week.append(text)
 
-    return "השבוע: " + ", ".join(parts) + "." if parts else ""
+    sections = []
+    if this_week:
+        sections.append("השבוע: "    + ", ".join(this_week) + ".")
+    if next_week:
+        sections.append("שבוע הבא: " + ", ".join(next_week) + ".")
+    return " ".join(sections)
 
 
 def build_footer(payload: dict) -> str:
     now = payload["run_time"]
+    is_motzei = payload.get("is_motzei", False)
     lines = []
 
-    upcoming = build_upcoming_text(now)
+    upcoming = build_upcoming_text(now, is_motzei=is_motzei)
     if upcoming:
         lines.append(upcoming)
 

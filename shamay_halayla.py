@@ -330,6 +330,18 @@ def get_station_passes() -> list[str]:
         iss_passes  = _get_satellite_passes(25544, "ISS",      ts, obs)
         css_passes  = _get_satellite_passes(48274, "טיאנגונג", ts, obs)
 
+        # סינון מעברים שכבר התרחשו: שומרים מעברים עתידיים
+        # ומעברים שעדיין בעיצומם (עד 5 דק' אחרי הזריחה).
+        now = datetime.now(ISRAEL_TZ)
+        cutoff = now - timedelta(minutes=5)
+        before_iss = len(iss_passes)
+        before_css = len(css_passes)
+        iss_passes = [p for p in iss_passes if p["rise_dt"] > cutoff]
+        css_passes = [p for p in css_passes if p["rise_dt"] > cutoff]
+        skipped = (before_iss - len(iss_passes)) + (before_css - len(css_passes))
+        if skipped:
+            print(f"  ⏭️ סוננו {skipped} מעברים שכבר התרחשו")
+
         result = []
 
         double_pass = False
@@ -340,23 +352,23 @@ def get_station_passes() -> list[str]:
                     if diff < 600:
                         double_pass = True
                         result.append(
-                            f"🌟 *מעבר כפול הלילה!* ISS וטיאנגונג בשמיים יחד\n"
-                            f"   🛸 ISS: {ip['rise_str']} מ{ip['dir_rise']} לכיוון {ip['dir_set']} "
-                            f"(שיא {ip['alt_peak']}°, {ip['brightness']})\n"
-                            f"   🛸 טיאנגונג: {cp['rise_str']} מ{cp['dir_rise']} לכיוון {cp['dir_set']} "
-                            f"(שיא {cp['alt_peak']}°, {cp['brightness']})"
+                            f"🌟 *מעבר כפול הלילה!* תחנת החלל הבינלאומית והסינית בשמיים יחד\n"
+                            f"   🛸 *תחנת החלל הבינלאומית* (ISS): {ip['rise_str']} מ{ip['dir_rise']} "
+                            f"לכיוון {ip['dir_set']} (שיא {ip['alt_peak']}°, {ip['brightness']})\n"
+                            f"   🛸 *תחנת החלל הסינית* (טיאנגונג): {cp['rise_str']} מ{cp['dir_rise']} "
+                            f"לכיוון {cp['dir_set']} (שיא {cp['alt_peak']}°, {cp['brightness']})"
                         )
 
         if not double_pass:
             for p in iss_passes[:1]:
                 result.append(
-                    f"🛸 ISS עובר ב-{p['rise_str']} – "
+                    f"🛸 *תחנת החלל הבינלאומית* (ISS) עוברת ב-{p['rise_str']} – "
                     f"מ{p['dir_rise']} לכיוון {p['dir_set']} "
                     f"(שיא {p['alt_peak']}°, {p['brightness']})"
                 )
             for p in css_passes[:1]:
                 result.append(
-                    f"🛸 טיאנגונג עוברת ב-{p['rise_str']} – "
+                    f"🛸 *תחנת החלל הסינית* (טיאנגונג) עוברת ב-{p['rise_str']} – "
                     f"מ{p['dir_rise']} לכיוון {p['dir_set']} "
                     f"(שיא {p['alt_peak']}°, {p['brightness']})"
                 )
@@ -540,19 +552,34 @@ def get_astronomical_data() -> dict:
         moon_rise = None
         moon_set  = None
         try:
-            rise_utc = obs_evening.next_rising(moon_evening).datetime()
+            # אם הירח כבר מעל האופק בשקיעה (טיפוסי לירח מלא) –
+            # אנו רוצים את זמן הזריחה של היום (לפני השקיעה), לא של מחר.
+            if moon_visible_evening:
+                rise_utc = obs_evening.previous_rising(moon_evening).datetime()
+            else:
+                rise_utc = obs_evening.next_rising(moon_evening).datetime()
             rise_dt  = rise_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
-            if 19 <= rise_dt.hour or rise_dt.hour < 6:
+            today_d    = evening_il.date()
+            tomorrow_d = today_d + timedelta(days=1)
+            relevant = (
+                (rise_dt.date() == today_d    and rise_dt.hour >= 14) or
+                (rise_dt.date() == tomorrow_d and rise_dt.hour <  12)
+            )
+            if relevant:
                 moon_rise = rise_dt.strftime("%H:%M")
         except Exception:
             pass
         try:
             set_utc = obs_evening.next_setting(moon_evening).datetime()
             set_dt  = set_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
-            if 19 <= set_dt.hour or set_dt.hour < 6:
+            if 19 <= set_dt.hour or set_dt.hour < 12:
                 moon_set = set_dt.strftime("%H:%M")
         except Exception:
             pass
+
+        # זיהוי תקופת ירח מלא (כולל לילה לפני/אחרי) –
+        # להמלצה על תצפית בזריחת הירח הכתומה והגדולה
+        is_full_moon_period = (13.0 <= age <= 16.5) or pct >= 95
 
         # ── כוכבי לכת – מחושבים ב-19:30 ──
         planet_defs = [
@@ -580,6 +607,7 @@ def get_astronomical_data() -> dict:
             "moon_rise":            moon_rise,
             "moon_set":             moon_set,
             "moon_visible_evening": moon_visible_evening,
+            "is_full_moon_period":  is_full_moon_period,
             "planets_visible":      planets_visible,
             "sunset":               sunset,
             "sunrise":              sunrise,
@@ -590,8 +618,64 @@ def get_astronomical_data() -> dict:
         return {
             "moon_pct": 50, "moon_phase": "🌔 ירח גדל",
             "moon_rise": None, "moon_set": None,
+            "is_full_moon_period": False,
             "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
         }
+
+
+# ══════════════════════════════════════════
+# 4.5  קבוצות כוכבים נראות לפי עונה (מרכז ישראל)
+# ══════════════════════════════════════════
+
+# מבוסס על נראות ערב מוקדם (~21:00) ממרכז ישראל (~31° צפון).
+# כל ערך הוא רשימת תיאורים קצרים לפי כיוון.
+_CONSTELLATIONS_BY_MONTH: dict[int, list[str]] = {
+    1:  ["במזרח: *אוריון* עם חגורתו המפורסמת",
+         "במרכז: *השור* עם *הכימה* ו*אַלְדֵבָּרָן* האדום",
+         "צפון-מזרח: *תאומים*, ובמערב *הציידים* עם *סיריוס*"],
+    2:  ["דרום: *אוריון* גבוה במרכז השמיים",
+         "מערב: *השור* יורד",
+         "מזרח: *אריה* עולה עם *רגולוס*"],
+    3:  ["מערב: *אוריון* יורד לאופק",
+         "מעל הראש: *תאומים*",
+         "מזרח: *אריה* גבוה",
+         "צפון: *הדובה הגדולה*"],
+    4:  ["מעל הראש: *אריה* עם *רגולוס*",
+         "מזרח: *בתולה* עם *ספיקה* הכחולה",
+         "צפון: *הדובה הגדולה* גבוהה"],
+    5:  ["מזרח: *רועה הצאן* עם *ארקטורוס* הכתום",
+         "דרום: *בתולה*",
+         "מערב: *אריה* יורד",
+         "צפון: *הדובה הגדולה*"],
+    6:  ["דרום-מזרח: *עקרב* עולה עם *אנטארס* האדום",
+         "מזרח: *הרקולס*",
+         "מעל הראש: *רועה הצאן* עם *ארקטורוס*"],
+    7:  ["דרום: *עקרב* גבוה עם *אנטארס*",
+         "מזרח: *משולש הקיץ* (וגה, אלטיר, דנב) עולה",
+         "מעל: *הרקולס*"],
+    8:  ["מעל הראש: *משולש הקיץ* – וגה ב*נֶבֶל*, אלטיר ב*נֶשֶׁר*, דנב ב*בַּרְבּוּר*",
+         "דרום: *עקרב* יורד, *קשת* עם מרכז שביל החלב",
+         "מזרח: *פגסוס* מתחיל לעלות"],
+    9:  ["מעל הראש: *משולש הקיץ* עדיין שולט",
+         "מזרח: *פגסוס* ו*אנדרומדה* עם הגלקסיה M31",
+         "צפון: *קסיופאה* בצורת W"],
+    10: ["מעל הראש: *פגסוס* – הריבוע הגדול",
+         "מזרח: *אנדרומדה* עם הגלקסיה הקרובה ביותר",
+         "צפון: *קסיופאה*",
+         "מערב: *משולש הקיץ* יורד"],
+    11: ["מזרח: *השור* עם *הכימה* (אשכול הפלאיאדות), *אוריון* מתחיל לעלות מאוחר",
+         "מעל הראש: *אנדרומדה* ו*פגסוס*",
+         "צפון: *קסיופאה*"],
+    12: ["מזרח: *אוריון* עולה עם חגורתו, אחריו *השור*",
+         "מעל הראש: *השור* עם *הכימה*",
+         "צפון: *קסיופאה* גבוהה"],
+}
+
+
+def get_visible_constellations(now: datetime | None = None) -> list[str]:
+    if now is None:
+        now = datetime.now(ISRAEL_TZ)
+    return _CONSTELLATIONS_BY_MONTH.get(now.month, [])
 
 
 # ══════════════════════════════════════════
@@ -774,9 +858,16 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 {items}
 """
 
+    # פרסור התאריך לחיפוש "ביום זה בהיסטוריה"
+    try:
+        _dt_for_hist = datetime.strptime(date_str, "%d/%m/%Y")
+        day_month_en = _dt_for_hist.strftime("%B %-d")  # למשל "May 9"
+    except Exception:
+        day_month_en = date_str
+
     body = {
         "model":      CLAUDE_MODEL,
-        "max_tokens": 800,
+        "max_tokens": 1000,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "messages": [{"role": "user", "content": f"""אתה עיתונאי חלל. המשימה שלך היא לחפש ולסנן בלבד – לא לכתוב הודעה.
 {jewish_section}{recent_section}
@@ -784,13 +875,23 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 1. חדשות חלל בולטות השבוע – תגליות ג'יימס וב/האבל, שיגורים מיוחדים, גילויים חדשים
 2. אירועים אסטרונומיים – שביטים נראים, ליקויים, מטר מטאורים פעיל, Starlink מישראל
 3. כל דבר שחובב אסטרונומיה ישראלי לא יידע בלעדיך
-4. "ביום זה בהיסטוריה" – חפש this day in space history {date_str} ומצא אירוע היסטורי מעניין שקרה בתאריך הזה (אפשר בכל שנה). עדיפות לאירועים מרשימים: נחיתות, שיגורים ראשונים, תגליות, אסונות.
 
-החזר רשימה קצרה של עובדות גולמיות בלבד:
-• שם האירוע/תגלית
-• מה קרה בדיוק (עובדה אחת-שתיים, לא יותר)
-• האם נראה מישראל? כן/לא/חלקית (לחדשות שוטפות בלבד)
-• מתי פורסם / באיזו שנה (תאריך מדויק אם ידוע)
+🔴 חובה (אל תדלג!): "ביום זה בהיסטוריית החלל" –
+חפש: "{day_month_en} space history" / "this day in space history {day_month_en}".
+הבא **לפחות אירוע אחד** היסטורי מעניין שקרה בתאריך {day_month_en} בשנה כלשהי.
+עדיפות: נחיתות (אפולו, מאדים), שיגורים ראשונים, תגליות מדעיות, אסונות, צעדי חלל ראשונים, מבצעי וויאג'ר/קסיני/האבל.
+אם לא מצאת אירוע חזק לתאריך המדויק – בחר אירוע מהשבוע הנוכחי ({date_str} ± 3 ימים).
+ציין שנה מפורשת ושם הדמות/החללית/המשימה.
+
+החזר את התשובה במבנה הזה (חובה לכלול את כל הסעיפים):
+
+== חדשות שוטפות ==
+• שם האירוע/תגלית – עובדה אחת-שתיים – נראה מישראל: כן/לא/חלקית – פורסם: תאריך
+(2-4 פריטים)
+
+== ביום זה בהיסטוריה ==
+• [שנה] – שם האירוע/המשימה – עובדה אחת על מה קרה בדיוק
+(לפחות פריט אחד, רצוי 1-2)
 
 ללא עיצוב, ללא סגנון, ללא המלצות. רק עובדות."""}]
     }
@@ -874,7 +975,15 @@ def generate_message(payload: dict) -> str:
     _mr = astro.get('moon_rise')
     _ms = astro.get('moon_set')
     _mv = astro.get('moon_visible_evening', False)
-    if _mv:
+    _is_full = astro.get('is_full_moon_period', False)
+    if _is_full and _mr:
+        moon_status = (
+            f"🌙 *ירח מלא* (או קרוב לכך) – יזרח ב-{_mr}. "
+            f"זריחת ירח מלא היא תצפית מרשימה בפני עצמה: ירח גדול וכתום על האופק. "
+            f"המלץ לקוראים להתכוונן לזמן הזריחה ולהסתכל לכיוון מזרח – "
+            f"גם אם תצפית הכוכבים מוגבלת בגלל אור הירח."
+        )
+    elif _mv:
         moon_status = "🌙 גלוי כבר בתחילת הלילה" + (
             f", ישקע ב-{_ms}" if _ms else " ויישאר גלוי כל הלילה"
         )
@@ -882,6 +991,12 @@ def generate_message(payload: dict) -> str:
         moon_status = f"🌙 יזרח ב-{_mr} – עד אז השמיים חשוכים"
     else:
         moon_status = "🌙 לא יהיה גלוי כל הלילה"
+
+    constellations = get_visible_constellations(now_il)
+    constellations_block = (
+        chr(10).join(f"   {c}" for c in constellations)
+        if constellations else "   אין מידע עונתי"
+    )
 
     DYNAMIC_DATA = f"""═══════════════════════════════
 נתוני הערב — {date_str} | שעה: {current_time}
@@ -904,8 +1019,13 @@ def generate_message(payload: dict) -> str:
 🪐 כוכבי לכת נראים הלילה (מחושב ל-19:30 ישראל):
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}
 
-🛸 מעברי תחנות חלל (ISS / טיאנגונג):
+🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
+{constellations_block}
+   ⓘ אם הלילה חשוך (עננות נמוכה + אין ירח מציק) – שלב משפט קצר על קבוצות הכוכבים: ציין כיוון אחד-שניים בולטים. אל תפרט יותר מדי, רק מסגרת לתצפית.
+
+🛸 מעברי תחנות חלל (פתחים תמיד עם הטקסט העברי, לא עם "ISS" באנגלית):
 {chr(10).join(iss) if iss else "אין מעברים הלילה"}
+   ⓘ הזמנים לעיל כבר מסוננים ושייכים לעתיד או למעבר שעדיין בעיצומו. *לעולם אל תכתוב "ISS" בתחילת שורה* – פתח תמיד ב"תחנת החלל הבינלאומית" / "תחנת החלל הסינית". אם השורה מתחילה באנגלית, ב-WhatsApp הכיוון מתחרבש.
 
 ✡️ אירועים יהודיים היום:
 {chr(10).join(j_events) if j_events else "אין אירוע מיוחד הלילה"}
@@ -915,6 +1035,7 @@ def generate_message(payload: dict) -> str:
 
 📡 חדשות חלל ואסטרונומיה (נאספו בנפרד):
 {payload.get('space_news', 'אין חדשות זמינות')}
+   ⓘ חובה: אם בנתונים יש סעיף "ביום זה בהיסטוריה" – שלב **משפט אחד** (לא יותר) על האירוע ההיסטורי בתוך פסקת החדשות. זו פינה קבועה של הבוט – אל תדלג עליה.
 
 ⚠️ חשוב: אל תסיים ב"שאו מרום עיניכם..." – שורת החתימה מתווספת אוטומטית.
 ⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית."""

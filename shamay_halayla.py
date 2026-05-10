@@ -170,8 +170,13 @@ def _azimuth_to_hebrew(az: float) -> str:
     return "צפון"
 
 
-def _get_satellite_passes(norad_id: int, name: str, ts, obs) -> list[dict]:
-    """מחשב מעברים של לוויין נתון מעל נקודת התצפית"""
+def _get_satellite_passes(norad_id: int, name: str, ts, obs, eph=None) -> list[dict]:
+    """מחשב מעברים של לוויין נתון מעל נקודת התצפית.
+
+    אם מועבר ``eph`` (ephemeris פלנטרי), הפונקציה מסננת רק מעברים *נראים לעין*:
+    השמש מתחת ל-6°- אצל הצופה (דמדומים אזרחיים או חשוך) **וגם** הלוויין מואר ע"י השמש
+    (לא בצל כדור הארץ).
+    """
 
     # ══════════════════════════════════════════
     # שליפת TLE – מספר מקורות + retry על 503
@@ -268,7 +273,23 @@ def _get_satellite_passes(norad_id: int, name: str, ts, obs) -> list[dict]:
                 cur = {}
 
         result = []
+        skipped_invisible = 0
         for p in passes:
+            # ── סינון נראות לעין: שמש מתחת ל-6°- אצל הצופה והלוויין מואר ──
+            if eph is not None:
+                try:
+                    peak_ti = p.get("peak_ti", p["rise_ti"])
+                    sun_alt_at_obs = (
+                        (eph["earth"] + obs).at(peak_ti)
+                        .observe(eph["sun"]).apparent().altaz()[0].degrees
+                    )
+                    sat_sunlit = bool(sat.at(peak_ti).is_sunlit(eph))
+                    if sun_alt_at_obs > -6.0 or not sat_sunlit:
+                        skipped_invisible += 1
+                        continue
+                except Exception as vis_err:
+                    print(f"  ⚠️ {name}: שגיאת בדיקת נראות – ממשיך בלי לסנן ({vis_err})")
+
             try:
                 diff_rise = (sat - obs).at(p["rise_ti"])
                 alt_r, az_r, _ = diff_rise.altaz()
@@ -314,6 +335,9 @@ def _get_satellite_passes(norad_id: int, name: str, ts, obs) -> list[dict]:
                 "az_rise":    round(az_rise_deg) if dir_rise != "?" else "?",
             })
 
+        if skipped_invisible:
+            print(f"  ⏭️ {name}: סוננו {skipped_invisible} מעברים לא-נראים (שמיים בהירים או לוויין בצל)")
+
         return result
 
     except Exception as e:
@@ -327,8 +351,16 @@ def get_station_passes() -> list[str]:
         ts  = load.timescale()
         obs = wgs84.latlon(LAT, LON, elevation_m=ALT)
 
-        iss_passes  = _get_satellite_passes(25544, "ISS",      ts, obs)
-        css_passes  = _get_satellite_passes(48274, "טיאנגונג", ts, obs)
+        # ephemeris פלנטרי לבדיקת נראות לעין (~17MB, נשמר במטמון מקומי).
+        # אם הטעינה נכשלת ממשיכים בלי סינון נראות.
+        try:
+            eph = load("de421.bsp")
+        except Exception as e:
+            print(f"  ⚠️ טעינת de421.bsp נכשלה ({e}) – ממשיך בלי סינון נראות")
+            eph = None
+
+        iss_passes  = _get_satellite_passes(25544, "ISS",      ts, obs, eph=eph)
+        css_passes  = _get_satellite_passes(48274, "טיאנגונג", ts, obs, eph=eph)
 
         # סינון מעברים שכבר התרחשו: שומרים מעברים עתידיים
         # ומעברים שעדיין בעיצומם (עד 5 דק' אחרי הזריחה).
@@ -888,6 +920,10 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 2. אירועים אסטרונומיים – שביטים נראים, ליקויים, מטר מטאורים פעיל, Starlink מישראל
 3. כל דבר שחובב אסטרונומיה ישראלי לא יידע בלעדיך
 
+⛔ אל תכלול: "תמונת היום של נאס"א" (APOD), פוסטים בסגנון תיאור-תמונה,
+   ציוצים/פוסטים ב-X/טוויטר/אינסטגרם, "snapshot of the day" – אלה לא חדשות.
+   רק אירועים, תגליות, שיגורים ופרסומים מדעיים.
+
 🔴 חובה (אל תדלג!): "ביום זה בהיסטוריית החלל" –
 חפש: "{day_month_en} space history" / "this day in space history {day_month_en}".
 הבא **לפחות אירוע אחד** היסטורי מעניין שקרה בתאריך {day_month_en} בשנה כלשהי.
@@ -1164,8 +1200,15 @@ def send_whatsapp(message: str):
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
 
 
-def build_upcoming_text(now: datetime) -> str:
+def build_upcoming_text(now: datetime, is_motzei: bool = False) -> str:
     today = now.date()
+
+    # גבול "השבוע" – שבת הקרובה (Sun-Sat). במוצאי שבת/חג השבוע
+    # החדש כבר התחיל, אז "השבוע" כולל את 7 הימים הבאים עד שבת הבאה.
+    days_to_saturday = (5 - today.weekday()) % 7
+    if is_motzei and days_to_saturday == 0:
+        days_to_saturday = 7
+    end_of_this_week = today + timedelta(days=days_to_saturday)
 
     DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
@@ -1250,23 +1293,30 @@ def build_upcoming_text(now: datetime) -> str:
             unique.append(ev)
     events = unique[:4]
 
-    parts = []
+    this_week, next_week = [], []
     for ev in events:
         d = ev["days_away"]
         ev_day = DAY_NAMES[ev["date"].weekday()]
-        if d == 1:
-            parts.append(f"הערב *{ev['title']}*")
+        text = f"הערב *{ev['title']}*" if d == 1 else f"*{ev['title']}* ביום {ev_day}"
+        if ev["date"] <= end_of_this_week:
+            this_week.append(text)
         else:
-            parts.append(f"*{ev['title']}* ביום {ev_day}")
+            next_week.append(text)
 
-    return "השבוע: " + ", ".join(parts) + "." if parts else ""
+    sections = []
+    if this_week:
+        sections.append("השבוע: "    + ", ".join(this_week) + ".")
+    if next_week:
+        sections.append("שבוע הבא: " + ", ".join(next_week) + ".")
+    return " ".join(sections)
 
 
 def build_footer(payload: dict) -> str:
     now = payload["run_time"]
+    is_motzei = payload.get("is_motzei", False)
     lines = []
 
-    upcoming = build_upcoming_text(now)
+    upcoming = build_upcoming_text(now, is_motzei=is_motzei)
     if upcoming:
         lines.append(upcoming)
 

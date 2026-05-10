@@ -551,6 +551,9 @@ def get_astronomical_data() -> dict:
 
         moon_rise = None
         moon_set  = None
+        moon_rise_passed = False
+        moon_minutes_since_rise = None
+        now_il = datetime.now(ISRAEL_TZ)
         try:
             # אם הירח כבר מעל האופק בשקיעה (טיפוסי לירח מלא) –
             # אנו רוצים את זמן הזריחה של היום (לפני השקיעה), לא של מחר.
@@ -567,6 +570,11 @@ def get_astronomical_data() -> dict:
             )
             if relevant:
                 moon_rise = rise_dt.strftime("%H:%M")
+                moon_rise_passed = rise_dt < now_il
+                if moon_rise_passed:
+                    moon_minutes_since_rise = int(
+                        (now_il - rise_dt).total_seconds() / 60
+                    )
         except Exception:
             pass
         try:
@@ -605,6 +613,8 @@ def get_astronomical_data() -> dict:
             "moon_phase":           phase_name,
             "moon_age":             round(age, 1),
             "moon_rise":            moon_rise,
+            "moon_rise_passed":     moon_rise_passed,
+            "moon_minutes_since_rise": moon_minutes_since_rise,
             "moon_set":             moon_set,
             "moon_visible_evening": moon_visible_evening,
             "is_full_moon_period":  is_full_moon_period,
@@ -617,7 +627,9 @@ def get_astronomical_data() -> dict:
         print("⚠️ ephem לא מותקן – מחזיר נתונים חלקיים")
         return {
             "moon_pct": 50, "moon_phase": "🌔 ירח גדל",
-            "moon_rise": None, "moon_set": None,
+            "moon_rise": None, "moon_rise_passed": False,
+            "moon_minutes_since_rise": None,
+            "moon_set": None,
             "is_full_moon_period": False,
             "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
         }
@@ -972,25 +984,46 @@ def generate_message(payload: dict) -> str:
     current_time = now_il.strftime("%H:%M")
     is_daytime   = now_il.hour < 17
 
-    _mr = astro.get('moon_rise')
-    _ms = astro.get('moon_set')
-    _mv = astro.get('moon_visible_evening', False)
-    _is_full = astro.get('is_full_moon_period', False)
-    if _is_full and _mr:
-        moon_status = (
-            f"🌙 *ירח מלא* (או קרוב לכך) – יזרח ב-{_mr}. "
-            f"זריחת ירח מלא היא תצפית מרשימה בפני עצמה: ירח גדול וכתום על האופק. "
-            f"המלץ לקוראים להתכוונן לזמן הזריחה ולהסתכל לכיוון מזרח – "
-            f"גם אם תצפית הכוכבים מוגבלת בגלל אור הירח."
-        )
+    _mr        = astro.get('moon_rise')
+    _ms        = astro.get('moon_set')
+    _mv        = astro.get('moon_visible_evening', False)
+    _is_full   = astro.get('is_full_moon_period', False)
+    _mr_passed = astro.get('moon_rise_passed', False)
+    _mr_mins   = astro.get('moon_minutes_since_rise')
+
+    # סטטוס בסיסי – משפט אחד קצר וברור (ללא משפטים מורכבים).
+    if _mv and _ms:
+        moon_status = f"🌙 גלוי כבר בתחילת הלילה, ישקע ב-{_ms}"
     elif _mv:
-        moon_status = "🌙 גלוי כבר בתחילת הלילה" + (
-            f", ישקע ב-{_ms}" if _ms else " ויישאר גלוי כל הלילה"
-        )
-    elif _mr:
+        moon_status = "🌙 גלוי כבר בתחילת הלילה ויישאר גלוי כל הלילה"
+    elif _mr and not _mr_passed:
         moon_status = f"🌙 יזרח ב-{_mr} – עד אז השמיים חשוכים"
+    elif _mr and _mr_passed:
+        moon_status = f"🌙 זרח כבר ב-{_mr}"
     else:
         moon_status = "🌙 לא יהיה גלוי כל הלילה"
+
+    # רמז נפרד לירח מלא – נוסח שונה לכל תרחיש כדי למנוע מתח שגוי
+    full_moon_hint = ""
+    if _is_full:
+        if _mr and not _mr_passed:
+            full_moon_hint = (
+                f"   💡 *תקופת ירח מלא*. הזריחה ב-{_mr} תהיה תצפית מרשימה: "
+                f"ירח כתום וגדול על האופק המזרחי. המלץ לכוון את השעון לזמן הזריחה."
+            )
+        elif _mr and _mr_passed and _mr_mins is not None and _mr_mins <= 90:
+            full_moon_hint = (
+                f"   💡 *תקופת ירח מלא*. הירח זרח לפני {_mr_mins} דקות (ב-{_mr}) "
+                f"ועדיין נמוך באופק המזרחי – הצצה עכשיו עדיין תופסת אותו כתום וגדול."
+            )
+        elif _mv:
+            # ירח מלא, גלוי, זרח לפני יותר משעה וחצי – אור חזק ותצפית מוגבלת
+            full_moon_hint = (
+                f"   💡 *תקופת ירח מלא*. אור הירח חזק הלילה ויקשה על תצפית כוכבים חלשים – "
+                f"שווה לציין זאת לקוראים."
+            )
+        # אם תקופת ירח מלא אבל הירח לא גלוי כרגע (שקע / לפני זריחה לא רלוונטית) – אין רמז
+        # מיוחד; הסטטוס הבסיסי כבר אומר את הצורך.
 
     constellations = get_visible_constellations(now_il)
     constellations_block = (
@@ -1012,6 +1045,7 @@ def generate_message(payload: dict) -> str:
 
 🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
    {moon_status}
+{full_moon_hint}
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}

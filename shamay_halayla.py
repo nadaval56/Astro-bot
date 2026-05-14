@@ -1200,7 +1200,22 @@ def send_whatsapp(message: str):
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
 
 
-def build_upcoming_text(now: datetime, is_motzei: bool = False) -> str:
+def _was_mentioned_recently(title: str, history: dict, today: date, days_back: int) -> bool:
+    """האם הכותרת הוזכרה ב-X הימים האחרונים בשדה ``jewish`` של ההיסטוריה."""
+    if not history or not title:
+        return False
+    for offset in range(1, days_back + 1):
+        key = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        day_data = history.get(key)
+        if not day_data:
+            continue
+        if title in day_data.get("jewish", ""):
+            return True
+    return False
+
+
+def build_upcoming_text(now: datetime, is_motzei: bool = False,
+                       history: dict | None = None) -> str:
     today = now.date()
 
     # גבול "השבוע" – שבת הקרובה (Sun-Sat). במוצאי שבת/חג השבוע
@@ -1293,6 +1308,23 @@ def build_upcoming_text(now: datetime, is_motzei: bool = False) -> str:
             unique.append(ev)
     events = unique[:4]
 
+    # סינון לקצב סביר של הופעות:
+    # d==1 (הערב) – תמיד מציגים, זו תזכורת אחרונה.
+    # d>=2 – מציגים רק אם האירוע לא הוזכר ב-5 הימים האחרונים.
+    HISTORY_WINDOW_DAYS = 5
+    suppressed = []
+    visible_events = []
+    for ev in events:
+        if ev["days_away"] == 1:
+            visible_events.append(ev)
+        elif _was_mentioned_recently(ev["title"], history, today, HISTORY_WINDOW_DAYS):
+            suppressed.append(ev["title"])
+        else:
+            visible_events.append(ev)
+    if suppressed:
+        print(f"  ⏭️ אירועים שדוכאו (הוזכרו ב-{HISTORY_WINDOW_DAYS} ימים אחרונים): {', '.join(suppressed)}")
+    events = visible_events
+
     this_week, next_week = [], []
     for ev in events:
         d = ev["days_away"]
@@ -1314,9 +1346,10 @@ def build_upcoming_text(now: datetime, is_motzei: bool = False) -> str:
 def build_footer(payload: dict) -> str:
     now = payload["run_time"]
     is_motzei = payload.get("is_motzei", False)
+    history   = payload.get("history") or {}
     lines = []
 
-    upcoming = build_upcoming_text(now, is_motzei=is_motzei)
+    upcoming = build_upcoming_text(now, is_motzei=is_motzei, history=history)
     if upcoming:
         lines.append(upcoming)
 
@@ -1497,6 +1530,7 @@ def main():
         "iss":           iss,
         "jewish_events": j_events,
         "jdate":         jdate,
+        "history":       history,
         "history_text":  history_text,
         "space_news":    space_news,
         "is_motzei":     is_motzei,

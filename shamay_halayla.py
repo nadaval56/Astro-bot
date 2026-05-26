@@ -128,13 +128,19 @@ def get_cloud_cover() -> int:
         f"&timezone=Asia%2FJerusalem"
         f"&forecast_days=1"
     )
-    data   = requests.get(url, timeout=10).json()
-    times  = data["hourly"]["time"]
-    clouds = data["hourly"]["cloudcover"]
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data   = r.json()
+        times  = data["hourly"]["time"]
+        clouds = data["hourly"]["cloudcover"]
 
-    evening = [c for t, c in zip(times, clouds)
-               if 20 <= int(t.split("T")[1][:2]) <= 23]
-    return round(sum(evening) / len(evening)) if evening else 50
+        evening = [c for t, c in zip(times, clouds)
+                   if 20 <= int(t.split("T")[1][:2]) <= 23]
+        return round(sum(evening) / len(evening)) if evening else 50
+    except Exception as e:
+        print(f"⚠️ לא הצלחתי למשוך נתוני עננות: {e}")
+        return 50
 
 
 def cloud_label(pct: int) -> tuple[str, str]:

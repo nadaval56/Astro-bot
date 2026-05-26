@@ -119,8 +119,8 @@ def get_jewish_events_today() -> list[str]:
 # 2. עננות – Open-Meteo (חינמי)
 # ══════════════════════════════════════════
 
-def get_cloud_cover() -> int:
-    """ממוצע עננות ב-20:00–23:00 בישראל"""
+def get_cloud_cover() -> int | None:
+    """ממוצע עננות ב-20:00–23:00 בישראל. מחזיר None כשאין נתון זמין."""
     url = (
         f"https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
@@ -137,10 +137,10 @@ def get_cloud_cover() -> int:
 
         evening = [c for t, c in zip(times, clouds)
                    if 20 <= int(t.split("T")[1][:2]) <= 23]
-        return round(sum(evening) / len(evening)) if evening else 50
+        return round(sum(evening) / len(evening)) if evening else None
     except Exception as e:
         print(f"⚠️ לא הצלחתי למשוך נתוני עננות: {e}")
-        return 50
+        return None
 
 
 def cloud_label(pct: int) -> tuple[str, str]:
@@ -1004,6 +1004,10 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 def generate_message(payload: dict) -> str:
     cloud_pct    = payload["cloud_pct"]
     cloud_desc   = payload["cloud_desc"]
+    if cloud_pct is None:
+        cloud_block = "🌤 עננות: אין נתון זמין – אל תתייחס לעננות או למצב השמיים בהודעה."
+    else:
+        cloud_block = f"🌤 עננות: {cloud_pct}%\n   הערכה: {cloud_desc}"
     astro        = payload["astro"]
     iss          = payload["iss"]
     j_events     = payload["jewish_events"]
@@ -1082,8 +1086,7 @@ def generate_message(payload: dict) -> str:
 📅 תאריך עברי עכשיו: {jdate['hebrew_display']}
 ⚠️ הלילה הקרוב (אחרי שקיעה ב-{astro.get('sunset','N/A')}) יהיה כבר היום העברי הבא – אל תכתוב על אירועי היום כאילו הם "הלילה"!
 
-🌤 עננות: {cloud_pct}%
-   הערכה: {cloud_desc}
+{cloud_block}
 
 🌙 הירח: {astro['moon_phase']} ({astro['moon_pct']}% מואר, גיל {astro['moon_age']} ימים)
    {moon_status}
@@ -1482,7 +1485,10 @@ def main():
 
     print("📡 מושך נתוני עננות...")
     cloud_pct            = get_cloud_cover()
-    cloud_status, cloud_desc = cloud_label(cloud_pct)
+    if cloud_pct is None:
+        cloud_status, cloud_desc = "unknown", None
+    else:
+        cloud_status, cloud_desc = cloud_label(cloud_pct)
 
     print("🔭 מחשב נתוני ירח וכוכבים (ל-19:30 ישראל)...")
     astro = get_astronomical_data()

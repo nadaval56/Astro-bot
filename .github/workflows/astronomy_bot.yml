@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # היסטוריה מלאה – נדרש ל-git pull --rebase לפני שמירת היסטוריה
 
       - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
@@ -60,8 +62,22 @@ jobs:
           git config user.email "astro-bot@shamay-halayla"
           [ -f message_history.json ] || echo "{}" > message_history.json
           git add message_history.json
-          git diff --staged --quiet || git commit -m "📚 history: $(date '+%Y-%m-%d')"
-          git push
+          if git diff --staged --quiet; then
+            echo "אין שינוי בהיסטוריה – אין מה לשמור"
+            exit 0
+          fi
+          git commit -m "📚 history: $(date '+%Y-%m-%d')"
+          for i in 1 2 3 4 5; do
+            if git pull --rebase --autostash origin main && git push; then
+              echo "✅ היסטוריה נשמרה (ניסיון $i)"
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "⚠️ push נכשל (ניסיון $i) – מנסה שוב..."
+            sleep $((i * 2))
+          done
+          echo "❌ שמירת היסטוריה נכשלה אחרי 5 ניסיונות" >&2
+          exit 1
 
       - name: 📊 שמירת לוג
         if: always()

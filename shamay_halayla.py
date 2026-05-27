@@ -44,6 +44,12 @@ CLAUDE_MODEL         = "claude-sonnet-4-6"   # gather, proofread, summary
 CLAUDE_MODEL_WRITER  = "claude-opus-4-6"     # generate_message – כתיבה בלבד
 CLAUDE_API   = "https://api.anthropic.com/v1/messages"
 
+# ברכות הפתיחה האפשריות – כל הודעה חייבת להתחיל באחת מהן
+VALID_OPENINGS = [
+    "בוקר טוב", "צהריים טובים", "ערב טוב", "לילה טוב",
+    "שבוע טוב", "מוצאי שבת", "חודש טוב",
+]
+
 # ── משתני סביבה ──────────────────────────
 ANTHROPIC_API_KEY      = os.environ["ANTHROPIC_API_KEY"]
 GREEN_API_INSTANCE     = os.environ["GREEN_API_INSTANCE"]
@@ -735,6 +741,18 @@ def get_visible_constellations(now: datetime | None = None) -> list[str]:
 from auto_fix import auto_fix
 
 
+def strip_preamble(message: str) -> str:
+    """חותך כל טקסט (ניתוח/הסבר של המודל) שלפני ברכת הפתיחה של ההודעה."""
+    earliest = -1
+    for opening in VALID_OPENINGS:
+        idx = message.find(opening)
+        if idx != -1 and (earliest == -1 or idx < earliest):
+            earliest = idx
+    if earliest > 0:
+        return message[earliest:].strip()
+    return message
+
+
 def fix_opening(message: str, payload: dict) -> str:
     now_hour  = datetime.now(ISRAEL_TZ).hour
     is_motzei = payload.get("is_motzei", False)
@@ -757,7 +775,6 @@ def fix_opening(message: str, payload: dict) -> str:
     first_line = lines[0]
     rest       = lines[1] if len(lines) > 1 else ""
 
-    VALID_OPENINGS = ["ערב טוב", "לילה טוב", "צהריים טובים", "שבוע טוב", "מוצאי שבת", "חודש טוב"]
     needs_fix = not any(first_line.startswith(o) for o in VALID_OPENINGS)
     wrong_opening = any(
         first_line.startswith(o) for o in VALID_OPENINGS
@@ -826,7 +843,8 @@ def quality_check(message: str, payload: dict) -> str:
                 f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
                 f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
                 f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
-                f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n\n"
+                f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
+                f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
                 f"ההודעה:\n{message}"
             )
         }]
@@ -834,7 +852,7 @@ def quality_check(message: str, payload: dict) -> str:
     try:
         r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
         r.raise_for_status()
-        result = r.json()["content"][0]["text"].strip()
+        result = strip_preamble(r.json()["content"][0]["text"].strip())
         if result and len(result) >= len(message) * 0.85:
             print("✅ quality_check: הושלם")
             return result
@@ -882,7 +900,7 @@ def proofread_hebrew(message: str) -> str:
     try:
         r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
         r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
+        return strip_preamble(r.json()["content"][0]["text"].strip())
     except Exception as e:
         print(f"⚠️ הגהה נכשלה: {e} – שולח הודעה מקורית")
         return message
@@ -1186,11 +1204,7 @@ def generate_message(payload: dict) -> str:
     ]
 
     raw = "\n".join(text_blocks).strip()
-    for marker in ["ערב טוב", "לילה טוב"]:
-        idx = raw.find(marker)
-        if idx > 0:
-            raw = raw[idx:]
-            break
+    raw = strip_preamble(raw)
     return raw or "⚠️ לא הצלחתי לייצר הודעה"
 
 

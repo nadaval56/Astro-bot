@@ -1252,7 +1252,13 @@ def send_whatsapp(message: str):
         f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
         f"/sendMessage/{GREEN_API_TOKEN}"
     )
-    payload = {"chatId": WHATSAPP_GROUP_ID, "message": message}
+    # linkPreview=False מבטל את כרטיס התצוגה-המקדימה ש-WhatsApp מייצר
+    # לקישור (למשל קישור ההצטרפות לקבוצה), שאחרת "משתלט" על ראש ההודעה.
+    payload = {
+        "chatId": WHATSAPP_GROUP_ID,
+        "message": message,
+        "linkPreview": False,
+    }
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")

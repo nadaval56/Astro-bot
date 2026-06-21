@@ -652,6 +652,38 @@ def get_astronomical_data() -> dict:
                     f"{name} – גובה {round(alt_deg)}°, כיוון {deg_to_dir(az)}, בהירות {mag}"
                 )
 
+        # ── היפוך/שוויון אסטרונומי (רק אם בתוך ±2 ימים) ──
+        # שונה מ"תקופות שמואל" (לוח עברי, ≈7 ביולי) – זה האירוע האסטרונומי
+        # האמיתי: היום הארוך/הקצר בשנה או יום-ולילה-שווים.
+        seasonal_event = None
+        try:
+            ref = ephem.Date(evening_utc)
+            candidates = [
+                ("solstice", ephem.next_solstice(ref)),
+                ("solstice", ephem.previous_solstice(ref)),
+                ("equinox",  ephem.next_equinox(ref)),
+                ("equinox",  ephem.previous_equinox(ref)),
+            ]
+            kind, edate = min(candidates, key=lambda c: abs(c[1] - ref))
+            ev_dt = edate.datetime().replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            days_away = (ev_dt.date() - now_il.date()).days
+            if abs(days_away) <= 2:
+                m = ev_dt.month
+                if kind == "solstice":
+                    label = ("היפוך הקיץ – היום הארוך בשנה" if m == 6
+                             else "היפוך החורף – היום הקצר בשנה")
+                else:
+                    label = ("שוויון האביב – יום ולילה שווים" if m == 3
+                             else "שוויון הסתיו – יום ולילה שווים")
+                when = ("היום"  if days_away ==  0 else
+                        "מחר"   if days_away ==  1 else
+                        "אתמול" if days_away == -1 else
+                        f"בעוד {days_away} ימים" if days_away > 0 else
+                        f"לפני {abs(days_away)} ימים")
+                seasonal_event = f"{label} ({when}, {ev_dt.strftime('%d/%m %H:%M')})"
+        except Exception:
+            pass
+
         return {
             "moon_pct":             pct,
             "moon_phase":           phase_name,
@@ -662,6 +694,7 @@ def get_astronomical_data() -> dict:
             "moon_set":             moon_set,
             "moon_visible_evening": moon_visible_evening,
             "is_full_moon_period":  is_full_moon_period,
+            "seasonal_event":       seasonal_event,
             "planets_visible":      planets_visible,
             "sunset":               sunset,
             "sunrise":              sunrise,
@@ -675,6 +708,7 @@ def get_astronomical_data() -> dict:
             "moon_minutes_since_rise": None,
             "moon_set": None,
             "is_full_moon_period": False,
+            "seasonal_event": None,
             "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
         }
 
@@ -699,13 +733,13 @@ _CONSTELLATIONS_BY_MONTH: dict[int, list[str]] = {
     4:  ["מעל הראש: *אריה* עם *רגולוס*",
          "מזרח: *בתולה* עם *ספיקה* הכחולה",
          "צפון: *הדובה הגדולה* גבוהה"],
-    5:  ["מזרח: *רועה הצאן* עם *ארקטורוס* הכתום",
+    5:  ["מזרח: *רועה דובים* עם *ארקטורוס* הכתום",
          "דרום: *בתולה*",
          "מערב: *אריה* יורד",
          "צפון: *הדובה הגדולה*"],
     6:  ["דרום-מזרח: *עקרב* עולה עם *אנטארס* האדום",
          "מזרח: *הרקולס*",
-         "מעל הראש: *רועה הצאן* עם *ארקטורוס*"],
+         "מעל הראש: *רועה דובים* עם *ארקטורוס*"],
     7:  ["דרום: *עקרב* גבוה עם *אנטארס*",
          "מזרח: *משולש הקיץ* (וגה, אלטיר, דנב) עולה",
          "מעל: *הרקולס*"],
@@ -1112,6 +1146,7 @@ def generate_message(payload: dict) -> str:
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
+{f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
 🪐 כוכבי לכת נראים הלילה (מחושב ל-19:30 ישראל):
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}

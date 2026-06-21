@@ -1636,15 +1636,21 @@ def main():
     print("═"*50 + "\n")
 
     print("📱 שולח WhatsApp...")
-    if os.environ.get("DRY_RUN", "false").lower() == "true":
+    is_dry = os.environ.get("DRY_RUN", "false").lower() == "true"
+    if is_dry:
         print("🔍 DRY_RUN=true – לא שולח ווטסאפ")
     else:
         send_whatsapp(message)
 
-    print("📚 מסכם ושומר היסטוריה...")
     summary = extract_summary_from_message(message, payload)
-    save_history(history, today_key, summary)
-    print(f"✅ נשמר: {summary}")
+    if is_dry:
+        # הרצה יבשה לא משנה מצב: לא שולח ולא כותב היסטוריה,
+        # כדי שלא תסמן את היום כ"נשלח" ותחסום ריצה אמיתית.
+        print(f"🔍 DRY_RUN – לא שומר היסטוריה (הסיכום שהיה נשמר: {summary})")
+    else:
+        print("📚 מסכם ושומר היסטוריה...")
+        save_history(history, today_key, summary)
+        print(f"✅ נשמר: {summary}")
     print("✅ הכל הושלם!")
 
 

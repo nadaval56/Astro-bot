@@ -1419,6 +1419,11 @@ def build_footer(payload: dict) -> str:
     lines.append("")
     lines.append("שאו מרום עיניכם וראו מי ברא אלה 🌌")
 
+    # ── קישור הצטרפות לקבוצה (תוספת קשיחה, תמיד בסוף ההודעה) ──
+    lines.append("")
+    lines.append("להצטרפות לקבוצת הווטסאפ שלנו - אסטרו-בוט (בטא):")
+    lines.append("https://chat.whatsapp.com/JPkp1hyk4J938apVTFu6J1?s=cl&p=a&ilr=0")
+
     return "\n".join(lines)
 
 

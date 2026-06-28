@@ -1247,7 +1247,34 @@ def generate_message(payload: dict) -> str:
 # 6. שליחת WhatsApp (Green API)
 # ══════════════════════════════════════════
 
+def get_instance_state() -> str:
+    """מחזיר את מצב האינסטנס ב-Green API ('authorized' כשהכל תקין).
+
+    קריטי: ``sendMessage`` מחזיר 200 + ``idMessage`` *גם* כשהאינסטנס לא
+    מורשה — ההודעה פשוט נכנסת לתור (ונמחקת אחרי ``messagesTTL``, ברירת מחדל
+    24ש'). לכן צריך לבדוק את ה-state במפורש לפני שמכריזים על שליחה.
+    """
+    url = (
+        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"/getStateInstance/{GREEN_API_TOKEN}"
+    )
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    return r.json().get("stateInstance", "")
+
+
 def send_whatsapp(message: str):
+    # 1. ודא שהאינסטנס מורשה *לפני* השליחה. אם הטלפון המקושר offline /
+    #    המכשיר התנתק, ה-state לא יהיה 'authorized' וההודעה רק תיתקע בתור
+    #    בלי שתישלח בפועל — בדיוק התקלה של "הודעה אחת בתור" + לוגים ירוקים.
+    state = get_instance_state()
+    if state != "authorized":
+        raise RuntimeError(
+            f"❌ Green API לא מורשה (stateInstance={state!r}). "
+            "ההודעה לא נשלחה — חבר מחדש את המכשיר בקונסול Green API. "
+            "נמנעת שליחה לתור כדי לא לסמן את היום כ'נשלח'."
+        )
+
     url = (
         f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
         f"/sendMessage/{GREEN_API_TOKEN}"
@@ -1261,7 +1288,15 @@ def send_whatsapp(message: str):
     }
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
-    print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
+
+    # 2. ודא שבאמת התקבל idMessage. בלעדיו ה-200 חסר משמעות — אל תכריז שליחה.
+    id_message = r.json().get("idMessage")
+    if not id_message:
+        raise RuntimeError(
+            f"❌ Green API לא החזיר idMessage (תגובה: {r.text[:200]}). "
+            "ההודעה כנראה לא נכנסה לשליחה."
+        )
+    print(f"✅ נשלח | idMessage: {id_message}")
 
 
 def _was_mentioned_recently(title: str, history: dict, today: date, days_back: int) -> bool:

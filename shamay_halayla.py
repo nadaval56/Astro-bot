@@ -556,7 +556,25 @@ def get_astronomical_data() -> dict:
             sunset_dt  = None
             sunset = sunrise = "N/A"
 
-        # שלב 2: מעבר לזמן ערב (19:30) לכל שאר החישובים
+        # ── זמן "חושך מספיק" לתצפית: סוף דמדומים אזרחיים (השמש 6° מתחת לאופק) ──
+        # גם כוכב לכת בהיר נראה מאזור חשוך-יחסית רק כשהשמיים מתכהים מספיק –
+        # בישראל לרוב כ-30 דקות אחרי השקיעה. זה גם הרגע שבו כוכב נמוך עלול
+        # כבר להיות מתחת לאופק. לכן זה הזמן הנכון לחשב נראות כוכבי לכת בפועל.
+        dark_dt    = None
+        dark_utc   = None
+        dark_start = "N/A"
+        try:
+            obs_civil = ephem.Observer()
+            obs_civil.lat, obs_civil.lon, obs_civil.elev = obs.lat, obs.lon, obs.elev
+            obs_civil.date    = noon_utc
+            obs_civil.horizon = "-6"
+            dark_utc = obs_civil.next_setting(ephem.Sun(), use_center=True).datetime()
+            dark_dt  = dark_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            dark_start = dark_dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+        # שלב 2: מעבר לזמן ערב (19:30) לכל שאר החישובים (ירח)
         evening_il  = datetime.now(ISRAEL_TZ).replace(hour=19, minute=30, second=0, microsecond=0)
         evening_utc = evening_il.astimezone(pytz.utc)
         obs.date    = evening_utc
@@ -633,7 +651,9 @@ def get_astronomical_data() -> dict:
         # להמלצה על תצפית בזריחת הירח הכתומה והגדולה
         is_full_moon_period = (13.0 <= age <= 16.5) or pct >= 95
 
-        # ── כוכבי לכת – מחושבים ב-19:30 ──
+        # ── כוכבי לכת – נראות אמיתית: גובה כשהשמיים מתכהים + זמן שקיעה ──
+        # מחושב לרגע שהשמיים מתכהים מספיק (סוף דמדומים אזרחיים), לא לשקיעה.
+        # כך נמנעת ההמלצה השגויה "מיד אחרי השקיעה" על כוכב שכבר שוקע עד שמחשיך.
         planet_defs = [
             ("נוגה ♀",   ephem.Venus),
             ("מאדים ♂",  ephem.Mars),
@@ -641,15 +661,67 @@ def get_astronomical_data() -> dict:
             ("שבתאי ♄",  ephem.Saturn),
             ("אורנוס ⛢", ephem.Uranus),
         ]
+
+        def _obs_at(dt_utc):
+            o = ephem.Observer()
+            o.lat, o.lon, o.elev = obs.lat, obs.lon, obs.elev
+            o.date = dt_utc
+            return o
+
+        obs_dark   = _obs_at(dark_utc)   if dark_utc   else _obs_at(evening_utc)
+        obs_sunset = _obs_at(sunset_utc) if sunset_dt  else obs_dark
+        ref_label  = dark_start if dark_dt else "19:30"
+
         planets_visible = []
         for name, cls in planet_defs:
-            body    = cls(obs)
-            alt_deg = math.degrees(float(body.alt))
-            if alt_deg > 10:
-                az  = math.degrees(float(body.az))
-                mag = round(float(body.mag), 1)
+            b_dark    = cls(obs_dark)
+            alt_dark  = math.degrees(float(b_dark.alt))
+            az        = math.degrees(float(b_dark.az))
+            mag       = round(float(b_dark.mag), 1)
+            direction = deg_to_dir(az)
+
+            # שעת שקיעת הכוכב הקרובה אחרי השקיעה (החלון בערב במערב)
+            set_str = None
+            mins_after_dark = None
+            try:
+                ps_dt = (obs_sunset.next_setting(cls(obs_sunset)).datetime()
+                         .replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ))
+                set_str = ps_dt.strftime("%H:%M")
+                if dark_dt:
+                    mins_after_dark = int((ps_dt - dark_dt).total_seconds() / 60)
+            except Exception:
+                pass
+
+            # גובה בשקיעה – לזיהוי כוכב שהיה מעל האופק אך שוקע לפני שמחשיך
+            alt_sunset = None
+            try:
+                alt_sunset = math.degrees(float(cls(obs_sunset).alt))
+            except Exception:
+                pass
+
+            if alt_dark > 10:
+                desc = (f"{name} – גובה {round(alt_dark)}° ב{direction}, בהירות {mag} "
+                        f"(נראה משהשמיים מתכהים, ~{ref_label})")
+                if set_str:
+                    desc += f"; שוקע ב-{set_str}"
+                    if mins_after_dark is not None and mins_after_dark <= 60:
+                        desc += " → ⚠️ חלון צר! עדיף להתכוונן מיד כשמחשיך"
+                planets_visible.append(desc)
+
+            elif alt_dark > 0:
+                desc = (f"{name} – נמוך מאוד ({round(alt_dark)}°) ב{direction}, בהירות {mag}; "
+                        f"קשה לצפייה, חלון קצר בלבד אחרי שמחשיך (~{ref_label})")
+                if set_str:
+                    desc += f" ושוקע ב-{set_str}"
+                planets_visible.append(desc)
+
+            elif alt_sunset is not None and alt_sunset > 0:
+                # היה מעל האופק בשקיעה, אך שקע עד שהשמיים מתכהים – לא לצפייה!
                 planets_visible.append(
-                    f"{name} – גובה {round(alt_deg)}°, כיוון {deg_to_dir(az)}, בהירות {mag}"
+                    f"{name} (בהירות {mag}) – שוקע מוקדם מדי"
+                    f"{f', סביב {set_str}' if set_str else ''}; "
+                    f"עד שהשמיים מתכהים (~{ref_label}) הוא כבר מתחת לאופק – "
+                    f"⚠️ אל תמליץ לצפות בו 'אחרי השקיעה'"
                 )
 
         # ── היפוך/שוויון אסטרונומי (רק אם בתוך ±2 ימים) ──
@@ -698,6 +770,7 @@ def get_astronomical_data() -> dict:
             "planets_visible":      planets_visible,
             "sunset":               sunset,
             "sunrise":              sunrise,
+            "dark_start":           dark_start,
         }
 
     except ImportError:
@@ -710,7 +783,77 @@ def get_astronomical_data() -> dict:
             "is_full_moon_period": False,
             "seasonal_event": None,
             "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
+            "dark_start": "N/A",
         }
+
+
+# ══════════════════════════════════════════
+# 4.4  המלצת תצפית בירח לפי שלב
+# ══════════════════════════════════════════
+
+def get_moon_observation_recommendation(age: float, pct: int,
+                                         is_full_moon_period: bool) -> str:
+    """
+    מחזיר המלצת תצפית מותאמת לשלב הירח. כל שלב מבליט מטרות שונות:
+      • ירח חדש / סהר דק מאד → אין הפרעת אור → לילה לתצפית כוכבים ועצמי עומק
+      • סהר גדל → מכתשים לאורך קו האור-צל (הטרמינטור) – הצללים ארוכים והתבליט בולט
+      • רבע ראשון → השלישייה המרכזית, קלביוס, טיכו, הרי האפנינים
+      • ירח גדל (גיבוס) → קופרניקוס, אפלטון, מפרץ הקשת
+      • ירח מלא → אין צללים → ימים אפלים ומערכות הקרניים (טיכו, קופרניקוס)
+      • ירח פוחת → ערב חשוך לכוכבים, מכתשי האגף המערבי בחצי הלילה השני
+    """
+    # ── ירח חדש / כמעט חדש – אין אור ירח, לילה לכוכבים ──
+    if age < 2.0 or pct < 3:
+        return ("🌑 כמעט אין ירח – לילה אידאלי ל*תצפית כוכבים* ועצמי עומק: "
+                "שביל החלב, אשכולות וערפיליות. אין אור ירח שמפריע – "
+                "כוונו את הצופים לשמיים החשוכים, לא לירח.")
+
+    # ── סהר דק מאד (גדל) – ההמלצה העיקרית: כוכבים; בונוס: הסהר + אור אפר ──
+    if age < 4.0 and pct < 18:
+        return ("🌒 *סהר דק מאד* נמוך במערב מיד אחרי השקיעה, ושוקע מוקדם. "
+                "ההמלצה העיקרית הלילה היא *תצפית כוכבים* – הסהר הדק כמעט לא מאיר ולא מפריע. "
+                "כבונוס: חפשו את *אור האפר* (אור האדמה) שמאיר בעדינות את הצד החשוך של הסהר.")
+
+    # ── סהר גדל לקראת רבע ראשון – מכתשים לאורך הטרמינטור ──
+    if age < 7.0:
+        return ("🌒 שלב מצוין ל*תצפית במכתשים*! לאורך *קו האור-צל* (הטרמינטור) "
+                "הצללים ארוכים והתבליט בולט. כוונו משקפת או טלסקופ לאזור הגבול: "
+                "המכתשים *תאופילוס*, *צירילוס* ו*קתרינה* ליד *ים הנקטר*, "
+                "ובצפון *ים המשברים* הכהה והעגול.")
+
+    # ── רבע ראשון ממש – מרכז הדיסקה, השלישייה הגדולה ──
+    if age < 9.5:
+        return ("🌓 *רבע ראשון* – חצי ירח, הזמן הקלאסי ל*מכתשים*. "
+                "לאורך הטרמינטור במרכז הדיסקה: השלישייה *תלמי*, *אלפונסוס* ו*ארזכל*; "
+                "בדרום ענק המכתשים *קלביוס* ולצדו *טיכו*; "
+                "ובצפון *הרי האפנינים* שמטילים צללים חדים.")
+
+    # ── ירח גדל (גיבוס) – קופרניקוס, אפלטון, מפרץ הקשת ──
+    if age < 13.0:
+        return ("🌔 *ירח גדל* (גיבוס) – עוד שטח מואר. *קופרניקוס*, 'מלך המכתשים', "
+                "ניצב יפה עם דפנותיו המדורגות; בצפון מישור המכתש *אפלטון* "
+                "ו*מפרץ הקשת* שקצהו נדלק בזריחה; בדרום *טיכו* מתחיל לפרוש קרניים. "
+                "אור הירח כבר חזק – פחות אידאלי לכוכבים חלשים.")
+
+    # ── ירח מלא – אין צללים; ימים אפלים ומערכות הקרניים ──
+    if is_full_moon_period or pct >= 96:
+        return ("🌕 *ירח מלא* – האור מגיע ישר מלמעלה ואין צללים, "
+                "אז המכתשים נראים שטוחים. במקום זאת התמקדו ב*ימים האפלים* "
+                "שמציירים את 'פני הירח': *ים השלווה* (שם נחתה אפולו 11), "
+                "*ים הרוגע* ו*ים הגשמים*; ובמיוחד *מערכות הקרניים* הבהירות "
+                "שמתפרשות מהמכתשים *טיכו* ו*קופרניקוס* על פני הדיסקה. "
+                "אור הירח חזק מאד – תצפית כוכבים מוגבלת הלילה.")
+
+    # ── ירח פוחת (גיבוס/רבע אחרון) – ערב חשוך לכוכבים, מכתשים בחצי הלילה השני ──
+    if age < 22.0:
+        return ("🌖 *ירח פוחת* – הירח עולה מאוחר, כך שתחילת הלילה חשוכה ומצוינת "
+                "ל*תצפית כוכבים*. מי שער בשעות הקטנות יראה את הטרמינטור חוצה את "
+                "הדיסקה מהצד השני – הצללים חוזרים ומבליטים מכתשים באגף המערבי, "
+                "ובהם *גרימלדי* הכהה ו*אריסטרכוס* הבהיר.")
+
+    # ── סהר פוחת דק – שוב לילה לכוכבים ──
+    return ("🌘 *סהר פוחת דק* – נראה רק לפנות בוקר במזרח. הלילה כולו חשוך "
+            "ומושלם ל*תצפית כוכבים* ועצמי עומק, ללא הפרעת אור ירח.")
 
 
 # ══════════════════════════════════════════
@@ -1123,6 +1266,10 @@ def generate_message(payload: dict) -> str:
         # אם תקופת ירח מלא אבל הירח לא גלוי כרגע (שקע / לפני זריחה לא רלוונטית) – אין רמז
         # מיוחד; הסטטוס הבסיסי כבר אומר את הצורך.
 
+    moon_obs_recommendation = get_moon_observation_recommendation(
+        astro.get('moon_age', 0), astro.get('moon_pct', 0), _is_full
+    )
+
     constellations = get_visible_constellations(now_il)
     constellations_block = (
         chr(10).join(f"   {c}" for c in constellations)
@@ -1144,12 +1291,18 @@ def generate_message(payload: dict) -> str:
    {moon_status}
 {full_moon_hint}
 
+🔭 המלצת תצפית בירח (לפי שלב הירח – זו ההנחיה לבחירת מה ממליצים לצפות בו):
+   {moon_obs_recommendation}
+   ⓘ שלב את ההמלצה הזו אם הירח רלוונטי הלילה: סהר דק/ירח חדש → הפנה לתצפית כוכבים; ירח גדל → מכתשים ספציפיים לאורך קו האור-צל; ירח מלא → ימים אפלים ומערכות קרניים (לא מכתשים, אין צללים). אל תמליץ על "מכתשים" בירח מלא ולא על "ימים/קרניים" בסהר דק.
+
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
+🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
-🪐 כוכבי לכת נראים הלילה (מחושב ל-19:30 ישראל):
-{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים בגובה מספיק"}
+🪐 כוכבי לכת – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
+{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק כשהשמיים מתכהים"}
+   ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; צדק ושאר הכוכבים זקוקים לשמיים כהים יותר.
 
 🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
 {constellations_block}

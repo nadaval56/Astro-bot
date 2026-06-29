@@ -1247,7 +1247,57 @@ def generate_message(payload: dict) -> str:
 # 6. שליחת WhatsApp (Green API)
 # ══════════════════════════════════════════
 
+def get_instance_state() -> str:
+    """מחזיר את מצב האינסטנס ב-Green API ('authorized' כשהכל תקין).
+
+    קריטי: ``sendMessage`` מחזיר 200 + ``idMessage`` *גם* כשהאינסטנס לא
+    מורשה — ההודעה פשוט נכנסת לתור (ונמחקת אחרי ``messagesTTL``, ברירת מחדל
+    24ש'). לכן צריך לבדוק את ה-state במפורש לפני שמכריזים על שליחה.
+    """
+    url = (
+        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"/getStateInstance/{GREEN_API_TOKEN}"
+    )
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    return r.json().get("stateInstance", "")
+
+
+def message_still_queued(id_message: str) -> bool:
+    """האם ``id_message`` עדיין יושב בתור היוצא של Green API.
+
+    הכרחי: מעבר למכסה החודשית (תוכנית חינמית) / ניתוק, ``sendMessage``
+    מחזיר idMessage ומכניס לתור — אבל ההודעה *לא נמסרת*, היא נתקעת בתור.
+    בדיקה זו מבדילה בין "נכנס לתור" ל"נשלח בפועל".
+    """
+    url = (
+        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"/showMessagesQueue/{GREEN_API_TOKEN}"
+    )
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    queue = r.json()
+    if not isinstance(queue, list):
+        return False
+    # התור מחזיר messageID; sendMessage מחזיר idMessage – אותו ערך.
+    return any(
+        item.get("idMessage") == id_message or item.get("messageID") == id_message
+        for item in queue
+    )
+
+
 def send_whatsapp(message: str):
+    # 1. ודא שהאינסטנס מורשה *לפני* השליחה. אם הטלפון המקושר offline /
+    #    המכשיר התנתק, ה-state לא יהיה 'authorized' וההודעה רק תיתקע בתור
+    #    בלי שתישלח בפועל — בדיוק התקלה של "הודעה אחת בתור" + לוגים ירוקים.
+    state = get_instance_state()
+    if state != "authorized":
+        raise RuntimeError(
+            f"❌ Green API לא מורשה (stateInstance={state!r}). "
+            "ההודעה לא נשלחה — חבר מחדש את המכשיר בקונסול Green API. "
+            "נמנעת שליחה לתור כדי לא לסמן את היום כ'נשלח'."
+        )
+
     url = (
         f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
         f"/sendMessage/{GREEN_API_TOKEN}"
@@ -1261,7 +1311,32 @@ def send_whatsapp(message: str):
     }
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
-    print(f"✅ נשלח | idMessage: {r.json().get('idMessage','?')}")
+
+    # 2. ודא שבאמת התקבל idMessage. בלעדיו ה-200 חסר משמעות — אל תכריז שליחה.
+    #    מעבר למכסה Green API מחזיר גוף עם 'quota'/'exceeded' במקום idMessage.
+    resp = r.json()
+    id_message = resp.get("idMessage")
+    if not id_message:
+        raise RuntimeError(
+            f"❌ Green API לא החזיר idMessage (תגובה: {r.text[:300]}). "
+            "ייתכן שחרגת מהמכסה החודשית של התוכנית החינמית — "
+            "בדוק/שדרג תעריף ב-console.green-api.com."
+        )
+
+    # 3. ודא שההודעה באמת *עזבה* את התור. מעבר למכסה / ניתוק היא תיתקע בתור
+    #    למרות שהתקבל idMessage — וזה בדיוק המצב שבו לוגים "ירוקים" אבל כלום
+    #    לא נשלח. בודקים מספר פעמים עם המתנה קצרה לפני שמכריזים כישלון.
+    for attempt in range(4):
+        time.sleep(3)
+        if not message_still_queued(id_message):
+            print(f"✅ נשלח | idMessage: {id_message}")
+            return
+
+    raise RuntimeError(
+        f"❌ ההודעה נתקעה בתור Green API ולא נמסרה (idMessage={id_message}). "
+        "סיבה סבירה: חריגת מכסה חודשית בתוכנית החינמית, או ניתוק WhatsApp. "
+        "בדוק את החשבון ב-console.green-api.com (שדרוג תעריף מסיר את המכסה)."
+    )
 
 
 def _was_mentioned_recently(title: str, history: dict, today: date, days_back: int) -> bool:

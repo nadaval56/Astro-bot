@@ -1103,6 +1103,33 @@ def fix_date_line(message: str, payload: dict) -> str:
     return result
 
 
+def fix_fast_greeting(message: str, payload: dict) -> str:
+    """מסיר "גמר חתימה טובה" מכל הודעה שאינה יום כיפור.
+
+    "גמר חתימה טובה" שייך אך ורק לימים הנוראים (עשי"ת–נעילה). המודל נוטה
+    לצרף אותו ל"צום קל" בכל צום, כי "צום קל וגמר חתימה טובה" הוא הצירוף
+    המזוהה עם יום כיפור – הצום המפורסם. בכל צום אחר (י"ז בתמוז, ט' באב,
+    צום גדליה, י' בטבת, תענית אסתר) הברכה היא "צום קל" בלבד. הגנה זו
+    דטרמיניסטית ולא מסתמכת על שיפוט המודל.
+    """
+    import re
+
+    j_events = payload.get("jewish_events") or []
+    if any("כיפור" in ev for ev in j_events):
+        return message  # ביום כיפור הברכה לגיטימית – אל תיגע
+
+    if "גמר חתימה טובה" not in message:
+        return message
+
+    # הסר את הצירוף (עם מחבר "ו"/פסיק אופציונלי שלפניו), והשאר "צום קל" תקין.
+    cleaned = re.sub(r'[\s,]*ו?גמר\s+חתימה\s+טובה', '', message)
+    # אחד רווחים כפולים שנוצרו מההסרה.
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    if cleaned != message:
+        print('🔧 fix_fast_greeting: הוסר "גמר חתימה טובה" (לא יום כיפור)')
+    return cleaned
+
+
 def quality_check(message: str, payload: dict) -> str:
     sunset       = payload.get("astro", {}).get("sunset", "N/A")
     history_text = payload.get("history_text", "")
@@ -1958,6 +1985,9 @@ def main():
 
     print("📅 תיקון שורת תאריך...")
     message = fix_date_line(message, payload)
+
+    print("✡️ תיקון ברכת צום...")
+    message = fix_fast_greeting(message, payload)
 
     print("🔍 בקרה לוגית...")
     message = quality_check(message, payload)

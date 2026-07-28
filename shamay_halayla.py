@@ -621,6 +621,7 @@ def get_astronomical_data() -> dict:
         moon_set  = None
         moon_rise_passed = False
         moon_minutes_since_rise = None
+        moon_rise_after_sunset = False
         now_il = datetime.now(ISRAEL_TZ)
         try:
             # אם הירח כבר מעל האופק בשקיעה (טיפוסי לירח מלא) –
@@ -639,6 +640,13 @@ def get_astronomical_data() -> dict:
             if relevant:
                 moon_rise = rise_dt.strftime("%H:%M")
                 moon_rise_passed = rise_dt < now_il
+                # האפקט של "ירח כתום וגדול" בזריחה נראה רק כשהירח זורח *אחרי*
+                # השקיעה, אל תוך שמיים חשוכים/דמדומים – טיפוסי לט"ו ואילך.
+                # לפני ט"ו הירח זורח לפני השקיעה, באור יום מלא, וכבר גבוה
+                # ומלבין עד שמחשיך – ואין אפקט זריחה כתום כלל.
+                moon_rise_after_sunset = (
+                    sunset_dt is not None and rise_dt > sunset_dt
+                )
                 if moon_rise_passed:
                     moon_minutes_since_rise = int(
                         (now_il - rise_dt).total_seconds() / 60
@@ -780,6 +788,7 @@ def get_astronomical_data() -> dict:
             "moon_age":             round(age, 1),
             "moon_rise":            moon_rise,
             "moon_rise_passed":     moon_rise_passed,
+            "moon_rise_after_sunset": moon_rise_after_sunset,
             "moon_minutes_since_rise": moon_minutes_since_rise,
             "moon_set":             moon_set,
             "moon_visible_evening": moon_visible_evening,
@@ -797,6 +806,7 @@ def get_astronomical_data() -> dict:
         return {
             "moon_pct": 50, "moon_phase": "🌔 ירח גדל",
             "moon_rise": None, "moon_rise_passed": False,
+            "moon_rise_after_sunset": False,
             "moon_minutes_since_rise": None,
             "moon_set": None,
             "moon_colong": None,
@@ -1420,6 +1430,7 @@ def generate_message(payload: dict) -> str:
     _mv        = astro.get('moon_visible_evening', False)
     _is_full   = astro.get('is_full_moon_period', False)
     _mr_passed = astro.get('moon_rise_passed', False)
+    _mr_after  = astro.get('moon_rise_after_sunset', False)
     _mr_mins   = astro.get('moon_minutes_since_rise')
 
     # סטטוס בסיסי – משפט אחד קצר וברור (ללא משפטים מורכבים).
@@ -1437,14 +1448,17 @@ def generate_message(payload: dict) -> str:
     # רמז נפרד לירח מלא – נוסח שונה לכל תרחיש כדי למנוע מתח שגוי
     full_moon_hint = ""
     if _is_full:
-        if _mr and not _mr_passed:
+        # ── האפקט "ירח כתום וגדול" בזריחה נראה רק כשהירח זורח *אחרי* השקיעה
+        # (ט"ו ואילך). לפני ט"ו הירח זורח באור יום, ועד שמחשיך הוא כבר גבוה
+        # ומלבין – ולכן אין להמליץ על תצפית בזריחה כתומה. ──
+        if _mr_after and _mr and not _mr_passed:
             full_moon_hint = (
-                f"   💡 *תקופת ירח מלא*. הזריחה ב-{_mr} תהיה תצפית מרשימה: "
+                f"   💡 *תקופת ירח מלא*. הזריחה ב-{_mr} (אחרי השקיעה) תהיה תצפית מרשימה: "
                 f"ירח כתום וגדול על האופק המזרחי. המלץ לכוון את השעון לזמן הזריחה."
             )
-        elif _mr and _mr_passed and _mr_mins is not None and _mr_mins <= 90:
+        elif _mr_after and _mr and _mr_passed and _mr_mins is not None and _mr_mins <= 90:
             full_moon_hint = (
-                f"   💡 *תקופת ירח מלא*. הירח זרח לפני {_mr_mins} דקות (ב-{_mr}) "
+                f"   💡 *תקופת ירח מלא*. הירח זרח לפני {_mr_mins} דקות (ב-{_mr}, אחרי השקיעה) "
                 f"ועדיין נמוך באופק המזרחי – הצצה עכשיו עדיין תופסת אותו כתום וגדול."
             )
         elif _mv:

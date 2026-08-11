@@ -531,6 +531,21 @@ def deg_to_dir(deg: float) -> str:
     return DIRECTION_NAMES[round(deg / 45) % 8]
 
 
+def planet_mag_hint(mag) -> str:
+    """סימון נראות לפי בהירות – *לא* מסננים כוכבים עמומים, רק מציינים מה דרוש.
+    כוכבי לכת בהירים (נוגה, צדק, מאדים, שבתאי, כוכב חמה) נראים היטב בעין;
+    אורנוס (בהירות ~5.7) נראה בעין רק בשמיים חשוכים מאוד; נפטון (~7.9) טלסקופי."""
+    try:
+        m = float(mag)
+    except (TypeError, ValueError):
+        return ""
+    if m > 6.5:
+        return " (עמום מאוד – דרושים טלסקופ ושמיים חשוכים)"
+    if m > 4.5:
+        return " (עמום – נראה בעין רק בשמיים חשוכים מאוד, קל יותר במשקפת)"
+    return ""
+
+
 def get_astronomical_data() -> dict:
     try:
         import ephem
@@ -571,6 +586,24 @@ def get_astronomical_data() -> dict:
             dark_utc = obs_civil.next_setting(ephem.Sun(), use_center=True).datetime()
             dark_dt  = dark_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
             dark_start = dark_dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+        # ── זמן "לפנות בוקר" לתצפית בכוכבי בוקר במזרח ──
+        # סימטרי לחלון הערב: תחילת דמדומי הבוקר האזרחיים (השמש 6° מתחת לאופק
+        # בעלייתה, לפני הזריחה). זה הרגע שבו כוכב-בוקר מגיע לגובהו המרבי בעודו
+        # השמיים חשוכים מספיק לתצפית – מיד אחר כך האור מתחזק ומבליע אותו.
+        dawn_dt    = None
+        dawn_utc   = None
+        dawn_start = "N/A"
+        try:
+            obs_dawn_civil = ephem.Observer()
+            obs_dawn_civil.lat, obs_dawn_civil.lon, obs_dawn_civil.elev = obs.lat, obs.lon, obs.elev
+            obs_dawn_civil.date    = noon_utc
+            obs_dawn_civil.horizon = "-6"
+            dawn_utc = obs_dawn_civil.next_rising(ephem.Sun(), use_center=True).datetime()
+            dawn_dt  = dawn_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            dawn_start = dawn_dt.strftime("%H:%M")
         except Exception:
             pass
 
@@ -673,11 +706,13 @@ def get_astronomical_data() -> dict:
         _SOLAR_GLARE_ELONG = 15.0
 
         planet_defs = [
-            ("נוגה ♀",   ephem.Venus),
-            ("מאדים ♂",  ephem.Mars),
-            ("צדק ♃",    ephem.Jupiter),
-            ("שבתאי ♄",  ephem.Saturn),
-            ("אורנוס ⛢", ephem.Uranus),
+            ("נוגה ♀",     ephem.Venus),
+            ("כוכב חמה ☿", ephem.Mercury),
+            ("מאדים ♂",    ephem.Mars),
+            ("צדק ♃",      ephem.Jupiter),
+            ("שבתאי ♄",    ephem.Saturn),
+            ("אורנוס ⛢",   ephem.Uranus),
+            ("נפטון ♆",    ephem.Neptune),
         ]
 
         def _obs_at(dt_utc):
@@ -691,11 +726,13 @@ def get_astronomical_data() -> dict:
         ref_label  = dark_start if dark_dt else "19:30"
 
         planets_visible = []
+        evening_planet_names = set()  # למניעת דיווח כפול ברשימת הלילה/בוקר
         for name, cls in planet_defs:
             b_dark    = cls(obs_dark)
             alt_dark  = math.degrees(float(b_dark.alt))
             az        = math.degrees(float(b_dark.az))
             mag       = round(float(b_dark.mag), 1)
+            mag_hint  = planet_mag_hint(mag)
             direction = deg_to_dir(az)
             # מרחק זוויתי מהשמש – מזהה כוכב "בהצמדה" (בזוהר השמש, עצם-יום)
             elong     = abs(math.degrees(float(b_dark.elong)))
@@ -720,35 +757,98 @@ def get_astronomical_data() -> dict:
                 pass
 
             if alt_dark > 10:
-                desc = (f"{name} – גובה {round(alt_dark)}° ב{direction}, בהירות {mag} "
+                desc = (f"{name} – גובה {round(alt_dark)}° ב{direction}, בהירות {mag}{mag_hint} "
                         f"(נראה משהשמיים מתכהים, ~{ref_label})")
                 if set_str:
                     desc += f"; שוקע ב-{set_str}"
                     if mins_after_dark is not None and mins_after_dark <= 60:
                         desc += " → ⚠️ חלון צר! עדיף להתכוונן מיד כשמחשיך"
                 planets_visible.append(desc)
+                evening_planet_names.add(name)
 
             elif alt_dark > 0:
-                desc = (f"{name} – נמוך מאוד ({round(alt_dark)}°) ב{direction}, בהירות {mag}; "
+                desc = (f"{name} – נמוך מאוד ({round(alt_dark)}°) ב{direction}, בהירות {mag}{mag_hint}; "
                         f"קשה לצפייה, חלון קצר בלבד אחרי שמחשיך (~{ref_label})")
                 if set_str:
                     desc += f" ושוקע ב-{set_str}"
                 planets_visible.append(desc)
+                evening_planet_names.add(name)
 
             elif (alt_sunset is not None and alt_sunset > 0
                     and elong >= _SOLAR_GLARE_ELONG):
                 # היה מעל האופק בשקיעה, אך שקע עד שהשמיים מתכהים – לא לצפייה!
                 # (רק אם הכוכב עדיין במרחק זוויתי סביר מהשמש – ראו התנאי הבא)
                 planets_visible.append(
-                    f"{name} (בהירות {mag}) – שוקע מוקדם מדי"
+                    f"{name} (בהירות {mag}{mag_hint}) – שוקע מוקדם מדי"
                     f"{f', סביב {set_str}' if set_str else ''}; "
                     f"עד שהשמיים מתכהים (~{ref_label}) הוא כבר מתחת לאופק – "
                     f"⚠️ אל תמליץ לצפות בו 'אחרי השקיעה'"
                 )
+                evening_planet_names.add(name)
 
             # אחרת (elong < _SOLAR_GLARE_ELONG, או כבר מתחת לאופק בשקיעה):
             # הכוכב בהצמדה לשמש / עצם-יום – מדלגים בשקט, בלי שורת נתונים.
             # כך המודל אינו נדרש לחזור יום אחר יום על "אי אפשר לראות את X".
+
+        # ── כוכבי לכת שעולים במהלך הלילה / לפנות בוקר – נראות אמיתית במזרח ──
+        # מכסה גם כוכב שזורח בשעה מאוחרת (למשל 23:00) וגם כוכב-בוקר של ממש.
+        # הנראות מחושבת לתחילת דמדומי הבוקר (dawn_utc, השמש ‎-6°‎) – שם הכוכב
+        # בגובהו המרבי בעודו חשוך; ואת שעת הזריחה שלו במזרח מציינים בנפרד,
+        # כך שצופה שנשאר ער יידע מתי אפשר לתפוס אותו כבר בערב/בלילה.
+        # מדלגים על כוכב שכבר מופיע ברשימת הערב (מעל האופק כשמחשיך) כדי לא
+        # לדווח עליו פעמיים, ועל כוכב בהצמדה לשמש. מדווחים רק על נראה בפועל.
+        planets_night = []
+        obs_dawn = _obs_at(dawn_utc) if dawn_dt else None
+        if obs_dawn is not None:
+            for name, cls in planet_defs:
+                if name in evening_planet_names:
+                    continue
+                try:
+                    b_dawn   = cls(obs_dawn)
+                    alt_dawn = math.degrees(float(b_dawn.alt))
+                    az_m     = math.degrees(float(b_dawn.az))
+                    mag_m    = round(float(b_dawn.mag), 1)
+                    dir_m    = deg_to_dir(az_m)
+                    elong_m  = abs(math.degrees(float(b_dawn.elong)))
+                except Exception:
+                    continue
+
+                # כוכב בהצמדה לשמש (בזוהר השחר) / מתחת לאופק – מדלגים בשקט
+                if elong_m < _SOLAR_GLARE_ELONG or alt_dawn <= 0:
+                    continue
+
+                mag_hint_m = planet_mag_hint(mag_m)
+
+                # שעת זריחת הכוכב במזרח (מתי עלה במהלך הלילה)
+                rise_dt_il = None
+                rise_str   = None
+                try:
+                    rise_dt_il = (obs_dawn.previous_rising(cls(obs_dawn)).datetime()
+                                  .replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ))
+                    rise_str = rise_dt_il.strftime("%H:%M")
+                except Exception:
+                    pass
+
+                # סיווג: זרח בשעת ערב/לילה נוחה (‎~17:00–01:00‎) → נראה כבר בלילה;
+                # אחרת (זרח אחרי 01:00) → כוכב-בוקר של ממש.
+                evening_riser = (
+                    rise_dt_il is not None
+                    and (rise_dt_il.hour >= 17 or rise_dt_il.hour < 1)
+                )
+
+                alt_txt = (f"גובה {round(alt_dawn)}°" if alt_dawn > 10
+                           else f"נמוך ({round(alt_dawn)}°)")
+
+                if evening_riser and rise_str:
+                    desc = (f"{name} – עולה במזרח ב-{rise_str}, נראה מרוב הלילה ועד "
+                            f"עלות השחר; {alt_txt} ב{dir_m} לפנות בוקר (~{dawn_start}), "
+                            f"בהירות {mag_m}{mag_hint_m}")
+                else:
+                    desc = (f"{name} – {alt_txt} ב{dir_m} לפנות בוקר (~{dawn_start}), "
+                            f"בהירות {mag_m}{mag_hint_m}")
+                    if rise_str:
+                        desc += f"; עלה במזרח ב-{rise_str}"
+                planets_night.append(desc)
 
         # ── היפוך/שוויון אסטרונומי (רק אם בתוך ±2 ימים) ──
         # שונה מ"תקופות שמואל" (לוח עברי, ≈7 ביולי) – זה האירוע האסטרונומי
@@ -796,9 +896,11 @@ def get_astronomical_data() -> dict:
             "is_full_moon_period":  is_full_moon_period,
             "seasonal_event":       seasonal_event,
             "planets_visible":      planets_visible,
+            "planets_night":        planets_night,
             "sunset":               sunset,
             "sunrise":              sunrise,
             "dark_start":           dark_start,
+            "dawn_start":           dawn_start,
         }
 
     except ImportError:
@@ -812,8 +914,9 @@ def get_astronomical_data() -> dict:
             "moon_colong": None,
             "is_full_moon_period": False,
             "seasonal_event": None,
-            "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
-            "dark_start": "N/A",
+            "planets_visible": [], "planets_night": [],
+            "sunset": "N/A", "sunrise": "N/A",
+            "dark_start": "N/A", "dawn_start": "N/A",
         }
 
 
@@ -1506,9 +1609,14 @@ def generate_message(payload: dict) -> str:
 🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
-🪐 כוכבי לכת – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
-{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק כשהשמיים מתכהים"}
-   ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר. ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימה למעלה. כוכב שאינו מופיע ברשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
+🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
+{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק בערב כשהשמיים מתכהים"}
+   ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר.
+{(f'''🌙 כוכבי לכת שעולים במהלך הלילה / לפנות בוקר – נראות אמיתית במזרח (גובה מחושב לתחילת דמדומי הבוקר, ~{astro.get('dawn_start','N/A')}):
+{chr(10).join(astro['planets_night'])}
+   ⓘ אלה כוכבים שעולים במזרח *אחרי* שהערב מתקדם – חלקם כבר בשעת לילה נוחה (ראה "עולה במזרח ב-..."), אחרים ממש לפנות בוקר. אם יש כאן כוכב בולט (מאדים/צדק/שבתאי, או נוגה כ"כוכב השחר") שלב משפט קצר: הכיוון (מזרח), שעת הזריחה שלו, והגובה לפנות בוקר. אל תפרט על כל כוכב – בחר את הבולט/ים. הפרד בבירור בין תצפית הלילה/בוקר הזו לתצפית הערב.''') if astro.get('planets_night') else ''}
+   ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימות למעלה (ערב, לילה או בוקר). כוכב שאינו מופיע באף רשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
+   ⓘ כשכוכב מסומן כ"עמום" (כמו אורנוס/נפטון) – *אל תשמיט* את ההערה שדרושים משקפת/טלסקופ ושמיים חשוכים. אל תתאר כוכב עמום כ"בולט" או "זוהר" – הוא יעד לצופים מנוסים בלבד.
 
 🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
 {constellations_block}

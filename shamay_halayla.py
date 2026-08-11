@@ -574,6 +574,24 @@ def get_astronomical_data() -> dict:
         except Exception:
             pass
 
+        # ── זמן "לפנות בוקר" לתצפית בכוכבי בוקר במזרח ──
+        # סימטרי לחלון הערב: תחילת דמדומי הבוקר האזרחיים (השמש 6° מתחת לאופק
+        # בעלייתה, לפני הזריחה). זה הרגע שבו כוכב-בוקר מגיע לגובהו המרבי בעודו
+        # השמיים חשוכים מספיק לתצפית – מיד אחר כך האור מתחזק ומבליע אותו.
+        dawn_dt    = None
+        dawn_utc   = None
+        dawn_start = "N/A"
+        try:
+            obs_dawn_civil = ephem.Observer()
+            obs_dawn_civil.lat, obs_dawn_civil.lon, obs_dawn_civil.elev = obs.lat, obs.lon, obs.elev
+            obs_dawn_civil.date    = noon_utc
+            obs_dawn_civil.horizon = "-6"
+            dawn_utc = obs_dawn_civil.next_rising(ephem.Sun(), use_center=True).datetime()
+            dawn_dt  = dawn_utc.replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ)
+            dawn_start = dawn_dt.strftime("%H:%M")
+        except Exception:
+            pass
+
         # שלב 2: מעבר לזמן ערב (19:30) לכל שאר החישובים (ירח)
         evening_il  = datetime.now(ISRAEL_TZ).replace(hour=19, minute=30, second=0, microsecond=0)
         evening_utc = evening_il.astimezone(pytz.utc)
@@ -750,6 +768,52 @@ def get_astronomical_data() -> dict:
             # הכוכב בהצמדה לשמש / עצם-יום – מדלגים בשקט, בלי שורת נתונים.
             # כך המודל אינו נדרש לחזור יום אחר יום על "אי אפשר לראות את X".
 
+        # ── כוכבי לכת לפנות בוקר – נראות אמיתית במזרח לפני הזריחה ──
+        # מחושב לתחילת דמדומי הבוקר האזרחיים (dawn_utc, השמש ‎-6°‎). כוכב שעולה
+        # במזרח לפני עלות השחר לא נבדק כלל בחלון הערב, ולכן נעדר מההודעות עד כה
+        # (מאדים/צדק/שבתאי כשהם כוכבי בוקר, וגם נוגה כשהיא "כוכב השחר").
+        # כמו בחלון הערב: מדווחים אך ורק על כוכב שנראה בפועל, בלי שורת "אי אפשר".
+        planets_morning = []
+        obs_dawn = _obs_at(dawn_utc) if dawn_dt else None
+        if obs_dawn is not None:
+            for name, cls in planet_defs:
+                try:
+                    b_dawn   = cls(obs_dawn)
+                    alt_dawn = math.degrees(float(b_dawn.alt))
+                    az_m     = math.degrees(float(b_dawn.az))
+                    mag_m    = round(float(b_dawn.mag), 1)
+                    dir_m    = deg_to_dir(az_m)
+                    elong_m  = abs(math.degrees(float(b_dawn.elong)))
+                except Exception:
+                    continue
+
+                # כוכב בהצמדה לשמש (בזוהר השחר) – מדלגים בשקט
+                if elong_m < _SOLAR_GLARE_ELONG:
+                    continue
+
+                # שעת זריחת הכוכב הקרובה לפני עלות השחר (מתי עלה במזרח)
+                rise_str = None
+                try:
+                    pr_dt = (obs_dawn.previous_rising(cls(obs_dawn)).datetime()
+                             .replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ))
+                    rise_str = pr_dt.strftime("%H:%M")
+                except Exception:
+                    pass
+
+                if alt_dawn > 10:
+                    desc = (f"{name} – גובה {round(alt_dawn)}° ב{dir_m}, בהירות {mag_m} "
+                            f"(נראה לפנות בוקר לפני עלות השחר, ~{dawn_start})")
+                    if rise_str:
+                        desc += f"; עלה במזרח ב-{rise_str}"
+                    planets_morning.append(desc)
+                elif alt_dawn > 0:
+                    desc = (f"{name} – נמוך ({round(alt_dawn)}°) ב{dir_m}, בהירות {mag_m}; "
+                            f"נראה רק סמוך לעלות השחר (~{dawn_start})")
+                    if rise_str:
+                        desc += f", עלה ב-{rise_str}"
+                    planets_morning.append(desc)
+                # אחרת: מתחת לאופק בעלות השחר / עולה מאוחר מדי – מדלגים בשקט.
+
         # ── היפוך/שוויון אסטרונומי (רק אם בתוך ±2 ימים) ──
         # שונה מ"תקופות שמואל" (לוח עברי, ≈7 ביולי) – זה האירוע האסטרונומי
         # האמיתי: היום הארוך/הקצר בשנה או יום-ולילה-שווים.
@@ -796,9 +860,11 @@ def get_astronomical_data() -> dict:
             "is_full_moon_period":  is_full_moon_period,
             "seasonal_event":       seasonal_event,
             "planets_visible":      planets_visible,
+            "planets_morning":      planets_morning,
             "sunset":               sunset,
             "sunrise":              sunrise,
             "dark_start":           dark_start,
+            "dawn_start":           dawn_start,
         }
 
     except ImportError:
@@ -812,8 +878,9 @@ def get_astronomical_data() -> dict:
             "moon_colong": None,
             "is_full_moon_period": False,
             "seasonal_event": None,
-            "planets_visible": [], "sunset": "N/A", "sunrise": "N/A",
-            "dark_start": "N/A",
+            "planets_visible": [], "planets_morning": [],
+            "sunset": "N/A", "sunrise": "N/A",
+            "dark_start": "N/A", "dawn_start": "N/A",
         }
 
 
@@ -1506,9 +1573,13 @@ def generate_message(payload: dict) -> str:
 🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
-🪐 כוכבי לכת – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
-{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק כשהשמיים מתכהים"}
-   ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר. ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימה למעלה. כוכב שאינו מופיע ברשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
+🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
+{chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק בערב כשהשמיים מתכהים"}
+   ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר.
+{(f'''🌅 כוכבי לכת לפנות בוקר – נראות אמיתית במזרח (גובה מחושב לתחילת דמדומי הבוקר, ~{astro.get('dawn_start','N/A')}, לפני עלות השחר):
+{chr(10).join(astro['planets_morning'])}
+   ⓘ אלה כוכבים שעולים במזרח *לפני הזריחה* – לצופים שקמים מוקדם. אם יש כאן כוכב בולט (במיוחד נוגה כ"כוכב השחר", או מאדים/צדק/שבתאי) שלב משפט קצר: הכיוון (מזרח), הגובה, והשעה המשוערת (~{astro.get('dawn_start','N/A')}). אל תפרט על כל כוכב – בחר את הבולט/ים. אל תבלבל בין תצפית הבוקר הזו לתצפית הערב.''') if astro.get('planets_morning') else ''}
+   ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימות למעלה (ערב או בוקר). כוכב שאינו מופיע באף רשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
 
 🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
 {constellations_block}

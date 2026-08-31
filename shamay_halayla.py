@@ -44,6 +44,14 @@ CLAUDE_MODEL         = "claude-sonnet-4-6"   # gather, proofread, summary
 CLAUDE_MODEL_WRITER  = "claude-opus-4-6"     # generate_message – כתיבה בלבד
 CLAUDE_API   = "https://api.anthropic.com/v1/messages"
 
+# ── חלון שליחה מותר (שעון ישראל) ──────────
+# ריצה שנופלת מחוץ לחלון (22:30 בלילה עד 11:00 בבוקר) מתבטלת אוטומטית.
+# הרקע: אקשן חינמי של גיטהאב מתעכב לעיתים שעות, וריצת הערב נדחקה בפועל
+# אל אחרי חצות – שם התאריך כבר התחלף, `was_sent_today` מצא היסטוריה ריקה,
+# והודעה נשלחה באמצע הלילה. עדיף לוותר על ההודעה מאשר לשלוח בשעה 00:08.
+SEND_WINDOW_START = (11, 0)    # 11:00 – לא שולחים לפני
+SEND_WINDOW_END   = (22, 30)   # 22:30 – לא שולחים אחרי
+
 # ברכות הפתיחה האפשריות – כל הודעה חייבת להתחיל באחת מהן
 VALID_OPENINGS = [
     "בוקר טוב", "צהריים טובים", "ערב טוב", "לילה טוב",
@@ -2030,6 +2038,14 @@ def is_shabbat_or_yomtov_now(daytime_run: bool) -> bool:
     return False
 
 
+def in_send_window(now: datetime) -> bool:
+    """האם השעה הנוכחית (שעון ישראל) בתוך חלון השליחה המותר?"""
+    minutes = now.hour * 60 + now.minute
+    start   = SEND_WINDOW_START[0] * 60 + SEND_WINDOW_START[1]
+    end     = SEND_WINDOW_END[0]   * 60 + SEND_WINDOW_END[1]
+    return start <= minutes < end
+
+
 def was_sent_today(history: dict) -> bool:
     today_key = datetime.now(ISRAEL_TZ).strftime("%Y-%m-%d")
     return today_key in history
@@ -2058,6 +2074,20 @@ def detect_motzei(now: datetime) -> bool:
 def main():
     now = datetime.now(ISRAEL_TZ)
     print(f"\n🔭 שמי הלילה מתחיל | {now.strftime('%A %d/%m/%Y %H:%M')}\n")
+
+    # ── שער חלון השעות ────────────────────────────────
+    # ריצה שהתעכבה (או הופעלה) מחוץ ל-11:00–22:30 נעצרת כאן,
+    # לפני כל קריאת API, כדי שלא תישלח הודעה באמצע הלילה.
+    force  = os.environ.get("FORCE_SEND", "false").lower() == "true"
+    is_dry = os.environ.get("DRY_RUN",    "false").lower() == "true"
+    if not in_send_window(now) and not (force or is_dry):
+        print(
+            f"🌜 השעה {now.strftime('%H:%M')} מחוץ לחלון השליחה "
+            f"({SEND_WINDOW_START[0]:02d}:{SEND_WINDOW_START[1]:02d}–"
+            f"{SEND_WINDOW_END[0]:02d}:{SEND_WINDOW_END[1]:02d}) – "
+            f"הריצה מתבטלת (הוסף force_send=true להרצה ידנית)"
+        )
+        sys.exit(0)
 
     hour = now.hour
     history = load_history()
@@ -2184,7 +2214,6 @@ def main():
     print("═"*50 + "\n")
 
     print("📱 שולח WhatsApp...")
-    is_dry = os.environ.get("DRY_RUN", "false").lower() == "true"
     if is_dry:
         print("🔍 DRY_RUN=true – לא שולח ווטסאפ")
     else:

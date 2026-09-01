@@ -39,7 +39,7 @@ on:
 jobs:
   send-astronomy-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25   # הוגדל: מאז 5-series כל קריאה כוללת חשיבה
     permissions:
       contents: write   # נדרש לשמירת message_history.json
 

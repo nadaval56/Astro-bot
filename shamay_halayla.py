@@ -40,8 +40,11 @@ CLOUD_HOPEFUL     = 55   # חלקי – אפשרי עם תקווה
 CLOUD_POOR        = 80   # מעורפל – כבד, אך ייתכן פתח
 
 # Claude
-CLAUDE_MODEL         = "claude-sonnet-4-6"   # gather, proofread, summary
-CLAUDE_MODEL_WRITER  = "claude-opus-4-6"     # generate_message – כתיבה בלבד
+# ⚠️ ב-5-series החשיבה (thinking) דלוקה כברירת מחדל, והיא נספרת בתוך max_tokens.
+#    לכן כל קריאה כאן מגדירה max_tokens עם מרווח לחשיבה, ומחלצת את הטקסט דרך
+#    claude_text() ולא דרך content[0] – הבלוק הראשון עלול להיות thinking.
+CLAUDE_MODEL         = "claude-sonnet-5"   # gather, proofread, summary
+CLAUDE_MODEL_WRITER  = "claude-opus-5"     # generate_message – כתיבה בלבד
 CLAUDE_API   = "https://api.anthropic.com/v1/messages"
 
 # ── חלון שליחה מותר (שעון ישראל) ──────────
@@ -493,6 +496,27 @@ def format_history_for_prompt(history: dict) -> str:
     return "\n".join(lines)
 
 
+def claude_text(resp: dict) -> str:
+    """מחלץ את הטקסט מתשובת Claude – בבטחה.
+
+    שני מקרים שמחייבים את זה במקום ``resp["content"][0]["text"]``:
+      1. ב-5-series החשיבה דלוקה כברירת מחדל, ולכן הבלוק הראשון ב-content
+         הוא לרוב ``thinking`` ולא ``text`` – גישה ישירה ל-[0] תיפול ב-KeyError.
+      2. מסווגי הבטיחות עשויים להחזיר 200 תקין עם ``stop_reason == "refusal"``
+         ו-content ריק – גישה ל-[0] תיפול ב-IndexError במקום להיכשל בשקט.
+    """
+    if resp.get("stop_reason") == "refusal":
+        details = resp.get("stop_details") or {}
+        print(f"⚠️ Claude סירב לבקשה (קטגוריה: {details.get('category')})")
+        return ""
+
+    return "\n".join(
+        block["text"]
+        for block in resp.get("content", [])
+        if block.get("type") == "text"
+    ).strip()
+
+
 def extract_summary_from_message(message: str, payload: dict) -> dict:
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
@@ -500,8 +524,10 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
         "content-type":      "application/json",
     }
     body = {
-        "model":      CLAUDE_MODEL,
-        "max_tokens": 300,
+        "model":         CLAUDE_MODEL,
+        "max_tokens":    2000,
+        "thinking":      {"type": "adaptive"},
+        "output_config": {"effort": "low"},
         "messages": [{
             "role": "user",
             "content": (
@@ -517,9 +543,9 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
     }
     raw = ""
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=90)
         r.raise_for_status()
-        raw = r.json()["content"][0]["text"].strip()
+        raw = claude_text(r.json())
         raw = raw.replace("```json", "").replace("```", "").strip()
         start = raw.find('{')
         end   = raw.rfind('}')
@@ -1319,8 +1345,10 @@ def quality_check(message: str, payload: dict) -> str:
         "content-type":      "application/json",
     }
     body = {
-        "model":      CLAUDE_MODEL,
-        "max_tokens": 1200,
+        "model":         CLAUDE_MODEL,
+        "max_tokens":    4000,
+        "thinking":      {"type": "adaptive"},
+        "output_config": {"effort": "medium"},
         "messages": [{
             "role": "user",
             "content": (
@@ -1338,9 +1366,9 @@ def quality_check(message: str, payload: dict) -> str:
         }]
     }
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
         r.raise_for_status()
-        result = strip_preamble(r.json()["content"][0]["text"].strip())
+        result = strip_preamble(claude_text(r.json()))
         if result and len(result) >= len(message) * 0.85:
             print("✅ quality_check: הושלם")
             return result
@@ -1358,8 +1386,10 @@ def proofread_hebrew(message: str) -> str:
         "content-type":      "application/json",
     }
     body = {
-        "model":      CLAUDE_MODEL,
-        "max_tokens": 1500,
+        "model":         CLAUDE_MODEL,
+        "max_tokens":    4000,
+        "thinking":      {"type": "adaptive"},
+        "output_config": {"effort": "low"},
         "messages": [{
             "role": "user",
             "content": (
@@ -1386,9 +1416,13 @@ def proofread_hebrew(message: str) -> str:
         }]
     }
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
         r.raise_for_status()
-        return strip_preamble(r.json()["content"][0]["text"].strip())
+        result = strip_preamble(claude_text(r.json()))
+        if not result:
+            print("⚠️ הגהה החזירה תשובה ריקה – שולח הודעה מקורית")
+            return message
+        return result
     except Exception as e:
         print(f"⚠️ הגהה נכשלה: {e} – שולח הודעה מקורית")
         return message
@@ -1422,9 +1456,14 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
         day_month_en = date_str
 
     body = {
-        "model":      CLAUDE_MODEL,
-        "max_tokens": 1000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "model":         CLAUDE_MODEL,
+        "max_tokens":    6000,
+        "thinking":      {"type": "adaptive"},
+        # medium ולא high: high הריץ סבבי חשיבה+חיפוש ארוכים שחרגו מה-timeout
+        # וביטלו את כל מקטע החדשות. medium עם חשיבה אדפטיבית עדיין חזק יותר
+        # מ-Sonnet 4.6 בלי חשיבה, שהוא מה שרץ כאן עד היום.
+        "output_config": {"effort": "medium"},
+        "tools": [{"type": "web_search_20260209", "name": "web_search"}],
         "messages": [{"role": "user", "content": f"""אתה עיתונאי חלל. המשימה שלך היא לחפש ולסנן בלבד – לא לכתוב הודעה.
 {jewish_section}{recent_section}
 חפש באינטרנט לתאריך {date_str}:
@@ -1464,30 +1503,40 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
                 json={**body, "messages": messages},
-                timeout=90
+                timeout=240
             )
             r.raise_for_status()
         except Exception as e:
-            if ("429" in str(e) or "529" in str(e)) and attempt < 4:
+            # timeout הוא שגיאה חולפת, לא סופית: מאז 5-series הבקשה כוללת
+            # חשיבה וכמה סבבי חיפוש, ולכן היא עלולה לחרוג מדי פעם. בלי זה
+            # timeout בודד מוחק את כל מקטע החדשות מההודעה.
+            transient = (
+                "429" in str(e) or "529" in str(e)
+                or isinstance(e, requests.exceptions.Timeout)
+            )
+            if transient and attempt < 4:
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
                 except Exception:
                     retry_after = 30 * (attempt + 1)
-                print(f"⏳ 429 – ממתין {retry_after} שניות...")
+                print(f"⏳ {type(e).__name__} – ממתין {retry_after} שניות...")
                 time.sleep(retry_after)
                 continue
             print(f"⚠️ שגיאה ב-gather_space_news: {e}")
             return "אין חדשות חלל זמינות"
         resp = r.json()
 
-        text_blocks = [
-            block["text"]
-            for block in resp.get("content", [])
-            if block.get("type") == "text"
-        ]
+        text = claude_text(resp)
 
         if resp.get("stop_reason") == "end_turn":
-            return "\n".join(text_blocks).strip()
+            return text or "אין חדשות חלל זמינות"
+
+        # כלי-שרת (web_search) עוצר אחרי 10 סיבובים פנימיים ומחזיר pause_turn.
+        # ממשיכים בלי להוסיף הודעת משתמש – השרת מזהה את בלוק ה-server_tool_use
+        # האחרון וממשיך מאותה נקודה. בלי הטיפול הזה החיפוש נקטע באמצע.
+        if resp.get("stop_reason") == "pause_turn":
+            messages.append({"role": "assistant", "content": resp["content"]})
+            continue
 
         if resp.get("stop_reason") == "tool_use":
             messages.append({"role": "assistant", "content": resp["content"]})
@@ -1502,7 +1551,7 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
             messages.append({"role": "user", "content": tool_results})
             continue
 
-        return "\n".join(text_blocks).strip()
+        return text or "אין חדשות חלל זמינות"
 
     return "אין חדשות חלל זמינות"
 
@@ -1650,7 +1699,6 @@ def generate_message(payload: dict) -> str:
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta":    "prompt-caching-2024-07-31",
         "content-type":      "application/json",
     }
 
@@ -1670,9 +1718,11 @@ def generate_message(payload: dict) -> str:
     }
 
     body = {
-        "model":      CLAUDE_MODEL_WRITER,
-        "max_tokens": 1200,
-        "messages":   [initial_message],
+        "model":         CLAUDE_MODEL_WRITER,
+        "max_tokens":    8000,
+        "thinking":      {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+        "messages":      [initial_message],
     }
 
     messages = [initial_message]
@@ -1683,12 +1733,18 @@ def generate_message(payload: dict) -> str:
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
                 json={**body, "messages": messages},
-                timeout=60
+                timeout=180
             )
             r.raise_for_status()
             break
         except Exception as e:
-            if ("429" in str(e) or "529" in str(e)) and attempt < 2:
+            # כאן timeout חמור במיוחד: אין fallback, החריגה מפילה את כל
+            # הריצה ולא נשלחת הודעה בכלל. לכן הוא נחשב חולף ומנוסה שוב.
+            transient = (
+                "429" in str(e) or "529" in str(e)
+                or isinstance(e, requests.exceptions.Timeout)
+            )
+            if transient and attempt < 2:
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
                 except Exception:
@@ -1707,14 +1763,7 @@ def generate_message(payload: dict) -> str:
     elif cache_written:
         print(f"💾 מטמון: נכתבו {cache_written} טוקנים למטמון (פעם ראשונה)")
 
-    text_blocks = [
-        block["text"]
-        for block in resp.get("content", [])
-        if block.get("type") == "text"
-    ]
-
-    raw = "\n".join(text_blocks).strip()
-    raw = strip_preamble(raw)
+    raw = strip_preamble(claude_text(resp))
     return raw or "⚠️ לא הצלחתי לייצר הודעה"
 
 

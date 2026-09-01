@@ -543,7 +543,7 @@ def extract_summary_from_message(message: str, payload: dict) -> dict:
     }
     raw = ""
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=90)
         r.raise_for_status()
         raw = claude_text(r.json())
         raw = raw.replace("```json", "").replace("```", "").strip()
@@ -1366,7 +1366,7 @@ def quality_check(message: str, payload: dict) -> str:
         }]
     }
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
         r.raise_for_status()
         result = strip_preamble(claude_text(r.json()))
         if result and len(result) >= len(message) * 0.85:
@@ -1416,7 +1416,7 @@ def proofread_hebrew(message: str) -> str:
         }]
     }
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=30)
+        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
         r.raise_for_status()
         result = strip_preamble(claude_text(r.json()))
         if not result:

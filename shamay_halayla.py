@@ -1459,7 +1459,10 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
         "model":         CLAUDE_MODEL,
         "max_tokens":    6000,
         "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "high"},   # effort גבוה = יותר קריאות חיפוש
+        # medium ולא high: high הריץ סבבי חשיבה+חיפוש ארוכים שחרגו מה-timeout
+        # וביטלו את כל מקטע החדשות. medium עם חשיבה אדפטיבית עדיין חזק יותר
+        # מ-Sonnet 4.6 בלי חשיבה, שהוא מה שרץ כאן עד היום.
+        "output_config": {"effort": "medium"},
         "tools": [{"type": "web_search_20260209", "name": "web_search"}],
         "messages": [{"role": "user", "content": f"""אתה עיתונאי חלל. המשימה שלך היא לחפש ולסנן בלבד – לא לכתוב הודעה.
 {jewish_section}{recent_section}
@@ -1500,16 +1503,23 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
                 json={**body, "messages": messages},
-                timeout=90
+                timeout=240
             )
             r.raise_for_status()
         except Exception as e:
-            if ("429" in str(e) or "529" in str(e)) and attempt < 4:
+            # timeout הוא שגיאה חולפת, לא סופית: מאז 5-series הבקשה כוללת
+            # חשיבה וכמה סבבי חיפוש, ולכן היא עלולה לחרוג מדי פעם. בלי זה
+            # timeout בודד מוחק את כל מקטע החדשות מההודעה.
+            transient = (
+                "429" in str(e) or "529" in str(e)
+                or isinstance(e, requests.exceptions.Timeout)
+            )
+            if transient and attempt < 4:
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
                 except Exception:
                     retry_after = 30 * (attempt + 1)
-                print(f"⏳ 429 – ממתין {retry_after} שניות...")
+                print(f"⏳ {type(e).__name__} – ממתין {retry_after} שניות...")
                 time.sleep(retry_after)
                 continue
             print(f"⚠️ שגיאה ב-gather_space_news: {e}")
@@ -1723,12 +1733,18 @@ def generate_message(payload: dict) -> str:
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
                 json={**body, "messages": messages},
-                timeout=60
+                timeout=180
             )
             r.raise_for_status()
             break
         except Exception as e:
-            if ("429" in str(e) or "529" in str(e)) and attempt < 2:
+            # כאן timeout חמור במיוחד: אין fallback, החריגה מפילה את כל
+            # הריצה ולא נשלחת הודעה בכלל. לכן הוא נחשב חולף ומנוסה שוב.
+            transient = (
+                "429" in str(e) or "529" in str(e)
+                or isinstance(e, requests.exceptions.Timeout)
+            )
+            if transient and attempt < 2:
                 try:
                     retry_after = int(e.response.headers.get("retry-after", 30))
                 except Exception:

@@ -2141,15 +2141,20 @@ def main():
     hour = now.hour
     history = load_history()
 
+    # ── שער "כבר נשלח היום" ────────────────────────────
+    # חל על כל ריצה – יום ולילה כאחד. קודם הבדיקה ישבה רק בענף הלילה,
+    # מתוך הנחה שריצת הצהריים היא תמיד הראשונה ביום. ב-2.9.2026 ההנחה
+    # נשברה: הרצה ידנית ב-15:55 וריצת הצהריים שהתעכבה ל-16:30 נפלו שתיהן
+    # לפני 17:00, אף אחת מהן לא בדקה את ההיסטוריה, ונשלחו שתי הודעות.
+    if was_sent_today(history) and not force:
+        print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
+        sys.exit(0)
+
     if hour < 17:
         if is_shabbat_or_yomtov_now(daytime_run=True):
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
     else:
-        if was_sent_today(history) and os.environ.get("FORCE_SEND", "false").lower() != "true":
-            print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
-            sys.exit(0)
-
         if is_shabbat_or_yomtov_now(daytime_run=False):
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)

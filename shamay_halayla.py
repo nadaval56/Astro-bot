@@ -16,6 +16,8 @@
 לוגיקת שבת/חג:
   • ערב שבת/חג  → לא שולח כלל
   • מוצאי שבת/חג → ממתין לצאת הכוכבים + 30 דקות
+  • הזיהוי מבוסס על מקטע נרות→הבדלה מ-Hebcal, ולכן תקף גם לחג דו-יומי
+    המחובר לשבת (ראש השנה), שבו היציאה היא רק יומיים אחרי הכניסה.
 """
 
 import os, sys, json, math, time
@@ -54,6 +56,15 @@ CLAUDE_API   = "https://api.anthropic.com/v1/messages"
 # והודעה נשלחה באמצע הלילה. עדיף לוותר על ההודעה מאשר לשלוח בשעה 00:08.
 SEND_WINDOW_START = (11, 0)    # 11:00 – לא שולחים לפני
 SEND_WINDOW_END   = (22, 30)   # 22:30 – לא שולחים אחרי
+
+# ── המתנה לצאת שבת/חג ─────────────────────
+# ריצת הערב נופלת לעיתים כמה דקות *לפני* צאת השבת. במקום לוותר על ההודעה
+# (וזו שבת שלמה בלי הודעה) הריצה ממתינה בתוך עצמה עד ההבדלה + מרווח.
+# MAX_WAIT_MIN חוסם המתנות ארוכות – בחג דו-יומי היציאה היא יום שלם קדימה,
+# ושם נכון לדלג ולא להחזיק ראנר תפוס.
+# ⚠️ timeout-minutes ב-astronomy_bot.yml חייב לכסות MAX_WAIT_MIN + זמן ריצה.
+HAVDALAH_BUFFER_MIN = 30   # "מוצאי שבת/חג → ממתין לצאת הכוכבים + 30 דקות"
+MAX_WAIT_MIN        = 75   # מעבר לזה – מדלגים במקום להמתין
 
 # ברכות הפתיחה האפשריות – כל הודעה חייבת להתחיל באחת מהן
 VALID_OPENINGS = [
@@ -2048,48 +2059,108 @@ def strip_closing_line(message: str) -> str:
 # 7. נקודת כניסה ראשית
 # ══════════════════════════════════════════
 
-def is_shabbat_or_yomtov_now(daytime_run: bool) -> bool:
-    if not daytime_run:
-        return False
+def _fetch_shabbat_events(now: datetime) -> list[tuple[datetime, str]] | None:
+    """
+    כל אירועי הדלקת-נרות/הבדלה סביב `now` (אתמול–מחר), ממוינים לפי זמן.
+    מחזיר None אם אף קריאה ל-Hebcal לא הצליחה – כדי שהקורא יבחין בין
+    "אין שבת" לבין "אין מידע".
 
-    now   = datetime.now(ISRAEL_TZ)
-    today = now.date()
-    yesterday = today - timedelta(days=1)
+    שולפים שלושה ימים ולא אחד, כי נקודת הכניסה לשבת/חג יכולה להיות אתמול
+    (מוצאי שבת), והיציאה יכולה להיות מחר – למשל בחג דו-יומי שמחובר לשבת,
+    שבו ההבדלה היחידה היא יומיים אחרי הדלקת הנרות הראשונה.
+    """
+    seen: set[tuple[datetime, str]] = set()
+    ok = False
 
-    url = (
-        f"https://www.hebcal.com/shabbat?cfg=json"
-        f"&geonameid={GEONAMEID}&m=50&lg=s"
-        f"&yt=G&date={yesterday.isoformat()}"
-    )
-    try:
-        items = requests.get(url, timeout=10).json().get("items", [])
+    for offset in (-1, 0, 1):
+        ref = now.date() + timedelta(days=offset)
+        url = (
+            f"https://www.hebcal.com/shabbat?cfg=json"
+            f"&geonameid={GEONAMEID}&m=50&lg=s"
+            f"&yt=G&date={ref.isoformat()}"
+        )
+        try:
+            items = requests.get(url, timeout=10).json().get("items", [])
+        except Exception:
+            continue
+        ok = True
         for item in items:
-            if item.get("category") == "candles":
-                try:
-                    candles_dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                    if candles_dt.date() == yesterday:
-                        return True
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    url_today = (
-        f"https://www.hebcal.com/shabbat?cfg=json"
-        f"&geonameid={GEONAMEID}&m=50&lg=s"
-        f"&yt=G&date={today.isoformat()}"
-    )
-    try:
-        items = requests.get(url_today, timeout=10).json().get("items", [])
-        for item in items:
-            if item.get("category") == "candles":
+            cat = item.get("category")
+            if cat not in ("candles", "havdalah"):
+                continue
+            try:
                 dt = datetime.fromisoformat(item["date"]).astimezone(ISRAEL_TZ)
-                if dt <= now:
-                    return True
-    except Exception:
-        pass
+            except Exception:
+                continue
+            seen.add((dt, cat))
 
-    return False
+    if not ok:
+        return None
+    return sorted(seen)
+
+
+# ימים טובים בישראל לפי (חודש עברי, יום) בספירת pyluach –
+# 1=ניסן ... 7=תשרי. חול המועד אינו כאן: הבוט שולח בחול המועד.
+YOM_TOV_ISRAEL = {
+    (7, 1), (7, 2),    # ראש השנה
+    (7, 10),           # יום כיפור
+    (7, 15),           # סוכות א'
+    (7, 22),           # שמיני עצרת
+    (1, 15), (1, 21),  # פסח א' ושביעי של פסח
+    (3, 6),            # שבועות
+}
+
+
+def _is_shabbat_or_yomtov_date(d: date) -> bool:
+    """האם היום הלועזי `d` הוא שבת או יום טוב (לפי הלוח המקומי, בלי רשת)?"""
+    if d.weekday() == 5:
+        return True
+    from pyluach import dates as pdates
+    h = pdates.HebrewDate.from_pydate(d)
+    return (h.month, h.day) in YOM_TOV_ISRAEL
+
+
+def _shabbat_status_offline(now: datetime) -> bool:
+    """
+    גיבוי מקומי כש-Hebcal לא זמין. מחמיר בכוונה: אם היום שבת/יום טוב,
+    או שמחר שבת/יום טוב (כלומר ייתכן שכבר נכנס עם השקיעה) – לא שולחים.
+    עדיף לוותר על הודעה אחת מאשר לשלוח בשבת בגלל תקלת רשת.
+    """
+    today = now.date()
+    return (
+        _is_shabbat_or_yomtov_date(today)
+        or _is_shabbat_or_yomtov_date(today + timedelta(days=1))
+    )
+
+
+def shabbat_status(now: datetime) -> tuple[bool, datetime | None]:
+    """
+    → (האם `now` בתוך שבת/חג, זמן ההבדלה הקרוב)
+
+    במקום לנחש לפי "היו נרות אתמול" – מאתרים את האירוע האחרון שקדם ל-`now`.
+    אם הוא הדלקת נרות, אנחנו בפנים, וההבדלה היא האירוע הבא מסוגו.
+    כך גם חג דו-יומי המחובר לשבת (נרות בערב שישי → הבדלה במוצאי ראשון)
+    מזוהה נכון לכל אורכו, כולל בלילה שבין שני ימי החג.
+
+    כשאין מידע מ-Hebcal – נופלים ללוח המקומי ומחזירים (bool, None):
+    בלי זמן הבדלה אי אפשר להמתין, ולכן הריצה פשוט תדלג.
+    """
+    events = _fetch_shabbat_events(now)
+    if events is None:
+        print("⚠️ Hebcal לא זמין – נופל ללוח המקומי (מחמיר)")
+        return _shabbat_status_offline(now), None
+
+    last_cat = None
+    for dt, cat in events:
+        if dt > now:
+            break
+        last_cat = cat
+
+    if last_cat != "candles":
+        return False, None
+
+    havdalah = next((dt for dt, cat in events if cat == "havdalah" and dt > now), None)
+    return True, havdalah
 
 
 def in_send_window(now: datetime) -> bool:
@@ -2155,15 +2226,58 @@ def main():
         print("✅ כבר נשלחה הודעה היום – לא שולח שוב (הוסף force_send=true להרצה ידנית)")
         sys.exit(0)
 
-    if hour < 17:
-        if is_shabbat_or_yomtov_now(daytime_run=True):
-            print("✡️ עכשיו שבת/חג – לא שולח")
-            sys.exit(0)
-    else:
-        if is_shabbat_or_yomtov_now(daytime_run=False):
+    # ── שער שבת/חג ─────────────────────────────────────
+    # עד 12.9.2026 הענף הלילי לא נבדק כלל: is_shabbat_or_yomtov_now
+    # החזירה False מיידית כש-daytime_run=False, מתוך הנחה שריצת הערב
+    # נופלת ממילא אחרי צאת השבת. ההנחה נשברת בחג דו-יומי המחובר לשבת
+    # (ראש השנה 12–13.9.2026): שם החג יוצא רק במוצאי ראשון, וריצת שבת
+    # בערב הייתה שולחת הודעה באמצע החג. עכשיו שני הענפים נבדקים.
+    in_shabbat, havdalah = shabbat_status(now)
+
+    if in_shabbat and (force or is_dry):
+        print("⚠️ שבת/חג – עקיפה ידנית (force_send/test_mode) – ממשיך בלי להמתין")
+    elif in_shabbat:
+        if hour < 17 or havdalah is None:
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
 
+        # ריצת ערב שנפלה בתוך שבת/חג – ממתינים לצאת הכוכבים אם זה קרוב.
+        target   = havdalah + timedelta(minutes=HAVDALAH_BUFFER_MIN)
+        wait_min = (target - now).total_seconds() / 60
+
+        if wait_min > MAX_WAIT_MIN:
+            print(
+                f"✡️ עכשיו שבת/חג – היציאה רק ב-{target.strftime('%d/%m %H:%M')} "
+                f"(בעוד {wait_min / 60:.1f} שעות) – לא שולח"
+            )
+            sys.exit(0)
+
+        if not in_send_window(target):
+            print(
+                f"✡️ עכשיו שבת/חג – היציאה ב-{target.strftime('%H:%M')}, "
+                f"מחוץ לחלון השליחה – לא שולח"
+            )
+            sys.exit(0)
+
+        print(
+            f"✡️ שבת/חג – ממתין {wait_min:.0f} דק' עד "
+            f"{target.strftime('%H:%M')} (הבדלה {havdalah.strftime('%H:%M')} "
+            f"+ {HAVDALAH_BUFFER_MIN} דק')..."
+        )
+        time.sleep(max(0.0, (target - datetime.now(ISRAEL_TZ)).total_seconds()))
+
+        # אחרי ההמתנה השעה השתנתה – כל מי שמסתמך על now/hour חייב ערך טרי.
+        now  = datetime.now(ISRAEL_TZ)
+        hour = now.hour
+        print(f"🌟 צאת שבת/חג – ממשיך ({now.strftime('%H:%M')})")
+
+        # במהלך ההמתנה הספיקה ריצה אחרת (הרצה ידנית) לשלוח – טוענים מחדש.
+        history = load_history()
+        if was_sent_today(history) and not force:
+            print("✅ נשלחה הודעה במהלך ההמתנה – לא שולח שוב")
+            sys.exit(0)
+
+    if hour >= 17:
         print("🌙 ריצת לילה – שולח הודעה")
 
     is_motzei = (hour >= 17) and detect_motzei(now)

@@ -64,7 +64,11 @@ SEND_WINDOW_END   = (22, 30)   # 22:30 – לא שולחים אחרי
 # ושם נכון לדלג ולא להחזיק ראנר תפוס.
 # ⚠️ timeout-minutes ב-astronomy_bot.yml חייב לכסות MAX_WAIT_MIN + זמן ריצה.
 HAVDALAH_BUFFER_MIN = 30   # "מוצאי שבת/חג → ממתין לצאת הכוכבים + 30 דקות"
-MAX_WAIT_MIN        = 75   # מעבר לזה – מדלגים במקום להמתין
+MAX_WAIT_MIN        = 120  # מעבר לזה – מדלגים במקום להמתין
+# למה 120: השבת המאוחרת בשנה (תחילת יולי) יוצאת ב-20:47 שעון ישראל,
+# והיעד הוא 21:17. ריצה שנוחתת בזמן הקרון (19:30) צריכה להמתין 107 דקות.
+# תקרה נמוכה מזה הייתה מפילה שבתות קיץ שבהן הריצה *לא* התעכבה.
+# חג דו-יומי (יציאה 22+ שעות קדימה) עדיין חורג בבירור ומדלג.
 
 # ברכות הפתיחה האפשריות – כל הודעה חייבת להתחיל באחת מהן
 VALID_OPENINGS = [
@@ -2135,12 +2139,18 @@ def _shabbat_status_offline(now: datetime) -> bool:
 
 def shabbat_status(now: datetime) -> tuple[bool, datetime | None]:
     """
-    → (האם `now` בתוך שבת/חג, זמן ההבדלה הקרוב)
+    → (מותר לשלוח עכשיו?, הזמן שממנו מותר לשלוח)
 
-    במקום לנחש לפי "היו נרות אתמול" – מאתרים את האירוע האחרון שקדם ל-`now`.
-    אם הוא הדלקת נרות, אנחנו בפנים, וההבדלה היא האירוע הבא מסוגו.
-    כך גם חג דו-יומי המחובר לשבת (נרות בערב שישי → הבדלה במוצאי ראשון)
-    מזוהה נכון לכל אורכו, כולל בלילה שבין שני ימי החג.
+    "מותר" = גם לא בתוך מקטע נרות→הבדלה, וגם עברו HAVDALAH_BUFFER_MIN
+    דקות מההבדלה האחרונה.
+
+    במקום לנחש לפי "היו נרות אתמול" – מאתרים את האירוע האחרון שקדם ל-`now`:
+      • נרות   → אנחנו בתוך שבת/חג, והחזרה היא ההבדלה הבאה + המרווח.
+        כך גם חג דו-יומי המחובר לשבת (נרות בערב שישי → הבדלה במוצאי
+        ראשון) מזוהה נכון לכל אורכו, כולל בלילה שבין שני ימי החג.
+      • הבדלה  → יצאנו, אבל אם עוד בתוך המרווח מחכים את היתרה. בלי זה
+        ריצה שנוחתת דקה אחרי ההבדלה הייתה שולחת מיד, בעוד ריצה שנוחתת
+        דקה *לפניה* הייתה ממתינה 30 דקות – אותה מדיניות, תוצאה הפוכה.
 
     כשאין מידע מ-Hebcal – נופלים ללוח המקומי ומחזירים (bool, None):
     בלי זמן הבדלה אי אפשר להמתין, ולכן הריצה פשוט תדלג.
@@ -2148,19 +2158,26 @@ def shabbat_status(now: datetime) -> tuple[bool, datetime | None]:
     events = _fetch_shabbat_events(now)
     if events is None:
         print("⚠️ Hebcal לא זמין – נופל ללוח המקומי (מחמיר)")
-        return _shabbat_status_offline(now), None
+        return (not _shabbat_status_offline(now)), None
 
-    last_cat = None
+    last_dt = last_cat = None
     for dt, cat in events:
         if dt > now:
             break
-        last_cat = cat
+        last_dt, last_cat = dt, cat
 
-    if last_cat != "candles":
-        return False, None
+    if last_cat == "candles":
+        nxt = next((dt for dt, cat in events if cat == "havdalah" and dt > now), None)
+        if nxt is None:
+            return False, None
+        return False, nxt + timedelta(minutes=HAVDALAH_BUFFER_MIN)
 
-    havdalah = next((dt for dt, cat in events if cat == "havdalah" and dt > now), None)
-    return True, havdalah
+    if last_cat == "havdalah":
+        resume = last_dt + timedelta(minutes=HAVDALAH_BUFFER_MIN)
+        if resume > now:
+            return False, resume
+
+    return True, None
 
 
 def in_send_window(now: datetime) -> bool:
@@ -2232,39 +2249,37 @@ def main():
     # נופלת ממילא אחרי צאת השבת. ההנחה נשברת בחג דו-יומי המחובר לשבת
     # (ראש השנה 12–13.9.2026): שם החג יוצא רק במוצאי ראשון, וריצת שבת
     # בערב הייתה שולחת הודעה באמצע החג. עכשיו שני הענפים נבדקים.
-    in_shabbat, havdalah = shabbat_status(now)
+    may_send, resume_at = shabbat_status(now)
 
-    if in_shabbat and (force or is_dry):
+    if not may_send and (force or is_dry):
         print("⚠️ שבת/חג – עקיפה ידנית (force_send/test_mode) – ממשיך בלי להמתין")
-    elif in_shabbat:
-        if hour < 17 or havdalah is None:
+    elif not may_send:
+        if hour < 17 or resume_at is None:
             print("✡️ עכשיו שבת/חג – לא שולח")
             sys.exit(0)
 
         # ריצת ערב שנפלה בתוך שבת/חג – ממתינים לצאת הכוכבים אם זה קרוב.
-        target   = havdalah + timedelta(minutes=HAVDALAH_BUFFER_MIN)
-        wait_min = (target - now).total_seconds() / 60
+        wait_min = (resume_at - now).total_seconds() / 60
 
         if wait_min > MAX_WAIT_MIN:
             print(
-                f"✡️ עכשיו שבת/חג – היציאה רק ב-{target.strftime('%d/%m %H:%M')} "
+                f"✡️ עכשיו שבת/חג – היציאה רק ב-{resume_at.strftime('%d/%m %H:%M')} "
                 f"(בעוד {wait_min / 60:.1f} שעות) – לא שולח"
             )
             sys.exit(0)
 
-        if not in_send_window(target):
+        if not in_send_window(resume_at):
             print(
-                f"✡️ עכשיו שבת/חג – היציאה ב-{target.strftime('%H:%M')}, "
+                f"✡️ עכשיו שבת/חג – היציאה ב-{resume_at.strftime('%H:%M')}, "
                 f"מחוץ לחלון השליחה – לא שולח"
             )
             sys.exit(0)
 
         print(
             f"✡️ שבת/חג – ממתין {wait_min:.0f} דק' עד "
-            f"{target.strftime('%H:%M')} (הבדלה {havdalah.strftime('%H:%M')} "
-            f"+ {HAVDALAH_BUFFER_MIN} דק')..."
+            f"{resume_at.strftime('%H:%M')} (הבדלה + {HAVDALAH_BUFFER_MIN} דק')..."
         )
-        time.sleep(max(0.0, (target - datetime.now(ISRAEL_TZ)).total_seconds()))
+        time.sleep(max(0.0, (resume_at - datetime.now(ISRAEL_TZ)).total_seconds()))
 
         # אחרי ההמתנה השעה השתנתה – כל מי שמסתמך על now/hour חייב ערך טרי.
         now  = datetime.now(ISRAEL_TZ)

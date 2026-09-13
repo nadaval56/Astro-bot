@@ -1,0 +1,35 @@
+name: 🧪 בדיקות
+
+# הרקע: שני באגים רצופים (שער השבת/חג ב-12.9.2026, זמני הצום ב-13.9.2026)
+# נחתו באותו אזור לוגי בלי ששום דבר תפס אותם לפני הריצה בפועל. הבדיקות
+# כאן לא נוגעות ברשת ולא שולחות ווטסאפ – הן מזייפות את Hebcal ואת השעון.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    # commit של שמירת היסטוריה לא נוגע בקוד – אין טעם להריץ עליו
+    paths-ignore:
+      - 'message_history.json'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 התקנת ספריות
+        run: pip install -r requirements.txt
+
+      - name: 🧪 הרצת הבדיקות
+        run: python tests/run_all.py

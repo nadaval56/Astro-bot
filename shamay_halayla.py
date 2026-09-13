@@ -178,7 +178,11 @@ def get_jewish_events_today() -> list[str]:
         events.append(f"🕯️ {fast_night} – {when}")
 
     # ── ראש חודש – נכנס בשקיעה, כמו חג ──
-    if night_h.day in (1, 30):
+    # א' תשרי הוא אמנם ראש חודש, אך אינו מוכרז ככזה: ראש השנה גובר עליו,
+    # ולא מאחלים "חודש טוב" בראש השנה. (אלול תמיד בן 29 יום, ולכן אין
+    # ל' אלול והענף של day==30 לעולם לא מגיע לתשרי.)
+    is_rosh_hashana = (night_h.month == 7 and night_h.day == 1)
+    if night_h.day in (1, 30) and not is_rosh_hashana:
         if night_h.day == 30:
             next_month = pheb.Month(night_h.year, night_h.month) + 1
             rc_month = next_month.month_name(hebrew=True)

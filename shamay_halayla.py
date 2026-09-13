@@ -118,31 +118,74 @@ def get_jewish_date_info() -> dict:
     }
 
 
+# צומות בני 25 שעות – מתחילים בשקיעה. כל שאר הצומות מתחילים בעלות השחר,
+# כלומר *בבוקר שאחרי* כניסת היום העברי. ההבחנה הזו היא הסיבה שאי אפשר
+# להדביק תווית צום ליום העברי ולקוות שהמודל ינחש נכון.
+FASTS_FROM_SUNSET = {"ט׳ באב", "תשעה באב", "יום כיפור"}
+
+
 def get_jewish_events_today() -> list[str]:
+    """
+    אירועי הלוח העברי הרלוונטיים להודעה – *עם* הזמן שבו הם מתרחשים.
+
+    ב-13.9.2026 נשלחה הודעה שקבעה "צום גדליה הסתיים" בזמן שהצום טרם
+    התחיל. שלוש סיבות הצטברו:
+      1. pyluach מחזיר צום גם מ-holiday() וגם מ-fast_day(), והרשימה יצאה
+         עם אותו צום פעמיים.
+      2. התווית הייתה שם בלבד ("צום גדליה"), בלי רמז אם הוא מתחיל, נמשך
+         או הסתיים – והמודל ניחש, במוצאי חג, שהסתיים.
+      3. הרשימה תמיד דיברה על היום העברי שמתחיל הלילה, אבל הוצגה בפרומפט
+         תחת הכותרת "אירועים יהודיים היום".
+    לכן כאן מחושב במפורש מתי כל אירוע חל, והטקסט נמסר מוכן למודל.
+    """
     from pyluach import dates as pdates, hebrewcal as pheb
 
-    now   = datetime.now(ISRAEL_TZ)
-    today = now.date()
+    now          = datetime.now(ISRAEL_TZ)
+    after_sunset = now.hour >= 17          # אותו קריטריון כמו get_jewish_date_info
 
-    hdate = pdates.HebrewDate.from_pydate(today) + 1
+    today_h = pdates.HebrewDate.from_pydate(now.date())
+    night_h = today_h + 1                  # היום העברי שמתחיל/התחיל עם השקיעה
+    cur_h   = night_h if after_sunset else today_h   # היום העברי ברגע זה
 
     events = []
 
-    holiday = hdate.holiday(hebrew=True, israel=True)
-    if holiday:
-        events.append(f"✡️ {holiday}")
+    # ── חג/מועד – נכנס בשקיעה, ולכן תמיד לפי היום שמתחיל הלילה ──
+    fast_night = pheb.fast_day(night_h, hebrew=True)
+    holiday    = night_h.holiday(hebrew=True, israel=True)
+    if holiday and holiday != fast_night:   # צום שחוזר משני המקורות – פעם אחת בלבד
+        when = "חל עכשיו" if after_sunset else "נכנס הערב עם השקיעה"
+        events.append(f"✡️ {holiday} – {when}")
 
-    fast = pheb.fast_day(hdate, hebrew=True)
-    if fast:
-        events.append(f"🕯️ {fast}")
+    # ── צום שכבר בעיצומו (ריצת יום בתוך יום הצום עצמו) ──
+    if not after_sunset:
+        fast_now = pheb.fast_day(cur_h, hebrew=True)
+        if fast_now:
+            events.append(
+                f"🕯️ {fast_now} – הצום בעיצומו כרגע ומסתיים הערב בצאת הכוכבים"
+            )
 
-    if hdate.day in (1, 30):
-        if hdate.day == 30:
-            next_month = pheb.Month(hdate.year, hdate.month) + 1
+    # ── צום של היום העברי שמתחיל הלילה ──
+    if fast_night:
+        if fast_night in FASTS_FROM_SUNSET:
+            when = ("הצום התחיל עכשיו עם השקיעה ומסתיים מחר בצאת הכוכבים"
+                    if after_sunset else
+                    "הצום מתחיל הערב עם השקיעה ומסתיים מחר בצאת הכוכבים")
+        else:
+            when = ("הצום עדיין לא התחיל – הוא מתחיל מחר בבוקר בעלות השחר "
+                    "ומסתיים מחר בצאת הכוכבים"
+                    if after_sunset else
+                    "הצום מחר: מתחיל בעלות השחר ומסתיים בצאת הכוכבים")
+        events.append(f"🕯️ {fast_night} – {when}")
+
+    # ── ראש חודש – נכנס בשקיעה, כמו חג ──
+    if night_h.day in (1, 30):
+        if night_h.day == 30:
+            next_month = pheb.Month(night_h.year, night_h.month) + 1
             rc_month = next_month.month_name(hebrew=True)
         else:
-            rc_month = hdate.month_name(hebrew=True)
-        events.append(f"🌑 ראש חודש {rc_month} – חודש טוב!")
+            rc_month = night_h.month_name(hebrew=True)
+        when = "חל עכשיו" if after_sunset else "נכנס הערב עם השקיעה"
+        events.append(f"🌑 ראש חודש {rc_month} – {when}, חודש טוב!")
 
     return events
 
@@ -1703,8 +1746,9 @@ def generate_message(payload: dict) -> str:
 {chr(10).join(iss) if iss else "אין מעברים הלילה"}
    ⓘ הזמנים לעיל כבר מסוננים ושייכים לעתיד או למעבר שעדיין בעיצומו. *לעולם אל תכתוב "ISS" בתחילת שורה* – פתח תמיד ב"תחנת החלל הבינלאומית" / "תחנת החלל הסינית". אם השורה מתחילה באנגלית, ב-WhatsApp הכיוון מתחרבש.
 
-✡️ אירועים יהודיים היום:
+✡️ אירועים יהודיים:
 {chr(10).join(j_events) if j_events else "אין אירוע מיוחד הלילה"}
+   ⓘ בכל שורה כתוב *מתי* האירוע חל – זה כבר מחושב. כתוב בדיוק לפי מה שכתוב שם ואל תסיק בעצמך מתי צום מתחיל או מסתיים. במיוחד: אל תכתוב שצום "הסתיים" או "היה" אלא אם נכתב כך במפורש.
 
 🗂 היסטוריית הודעות אחרונות:
 {history_text}

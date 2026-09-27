@@ -125,6 +125,14 @@ def get_jewish_date_info() -> dict:
 FASTS_FROM_SUNSET = {"ט׳ באב", "תשעה באב", "יום כיפור"}
 
 
+# ימי חול המועד בישראל לפי (חודש עברי, יום) בספירת pyluach – 1=ניסן, 7=תשרי.
+CHOL_HAMOED = {
+    **{(7, d): "חול המועד סוכות" for d in range(16, 21)},
+    (7, 21): "הושענא רבה (חול המועד סוכות)",
+    **{(1, d): "חול המועד פסח" for d in range(16, 21)},
+}
+
+
 def get_jewish_events_today() -> list[str]:
     """
     אירועי הלוח העברי הרלוונטיים להודעה – *עם* הזמן שבו הם מתרחשים.
@@ -153,7 +161,13 @@ def get_jewish_events_today() -> list[str]:
     # ── חג/מועד – נכנס בשקיעה, ולכן תמיד לפי היום שמתחיל הלילה ──
     fast_night = pheb.fast_day(night_h, hebrew=True)
     holiday    = night_h.holiday(hebrew=True, israel=True)
-    if holiday and holiday != fast_night:   # צום שחוזר משני המקורות – פעם אחת בלבד
+    chol_hamoed = CHOL_HAMOED.get((night_h.month, night_h.day))
+    if chol_hamoed:
+        # pyluach מחזיר "סוכות"/"פסח" לכל ימי החג. בלי ההבחנה הזו כל ערב
+        # של חול המועד הוצג כאילו החג נכנס הערב. בלי ציון זמן: גם בריצת
+        # יום אנחנו כבר בתוך החג (יו"ט ראשון או חול המועד).
+        events.append(f"✡️ {chol_hamoed} – מועדים לשמחה!")
+    elif holiday and holiday != fast_night:   # צום שחוזר משני המקורות – פעם אחת בלבד
         when = "חל עכשיו" if after_sunset else "נכנס הערב עם השקיעה"
         events.append(f"✡️ {holiday} – {when}")
 

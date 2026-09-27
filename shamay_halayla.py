@@ -75,6 +75,7 @@ MAX_WAIT_MIN        = 120  # מעבר לזה – מדלגים במקום להמ�
 VALID_OPENINGS = [
     "בוקר טוב", "צהריים טובים", "ערב טוב", "לילה טוב",
     "שבוע טוב", "מוצאי שבת", "חודש טוב", "מועדים לשמחה",
+    "שבוע טוב ומועדים לשמחה",
 ]
 
 # ── משתני סביבה ──────────────────────────
@@ -1318,15 +1319,25 @@ def fix_whatsapp_bold(message: str) -> str:
     return message
 
 
+def chol_hamoed_opening(is_motzei: bool, now: datetime) -> str:
+    """ברכת הפתיחה בחול המועד.
+
+    במוצאי שבת – "שבוע טוב ומועדים לשמחה". במוצאי יו"ט ראשון שאינו שבת
+    נכנסים לחול המועד, ו"שבוע טוב" באמצע השבוע נשמע משונה.
+    """
+    if is_motzei and now.weekday() == 5:
+        return "שבוע טוב ומועדים לשמחה"
+    return "מועדים לשמחה"
+
+
 def fix_opening(message: str, payload: dict) -> str:
-    now_hour  = datetime.now(ISRAEL_TZ).hour
+    now       = datetime.now(ISRAEL_TZ)
+    now_hour  = now.hour
     is_motzei = payload.get("is_motzei", False)
     jdate     = payload.get("jdate", {})
 
-    # חול המועד גובר גם על מוצאי שבת/יו"ט: במוצאי יו"ט ראשון נכנסים לחול
-    # המועד, ו"שבוע טוב" ביום שאינו מוצאי שבת נשמע משונה.
     if jdate.get("is_chol_hamoed", False):
-        correct = "מועדים לשמחה"
+        correct = chol_hamoed_opening(is_motzei, now)
     elif is_motzei:
         correct = "שבוע טוב"
     elif jdate.get("is_rosh_chodesh", False):
@@ -1344,13 +1355,15 @@ def fix_opening(message: str, payload: dict) -> str:
     first_line = lines[0]
     rest       = lines[1] if len(lines) > 1 else ""
 
-    needs_fix = not any(first_line.startswith(o) for o in VALID_OPENINGS)
-    wrong_opening = any(
-        first_line.startswith(o) for o in VALID_OPENINGS
-        if o != correct and not (correct == "ערב טוב" and o == "לילה טוב")
+    # הפתיחה הארוכה ביותר שמתאימה – "שבוע טוב" הוא קידומת של
+    # "שבוע טוב ומועדים לשמחה", ואסור ששתיהן ייחשבו התאמה.
+    matched = max((o for o in VALID_OPENINGS if first_line.startswith(o)),
+                  key=len, default=None)
+    wrong_opening = matched is None or (
+        matched != correct and not (correct == "ערב טוב" and matched == "לילה טוב")
     )
 
-    if needs_fix or wrong_opening:
+    if wrong_opening:
         import re
         emoji_match = re.search(r'[\U00010000-\U0010ffff\u2600-\u26FF\u2700-\u27BF]', first_line)
         emoji = " " + emoji_match.group(0) if emoji_match else " 🌙"
@@ -1730,7 +1743,7 @@ def generate_message(payload: dict) -> str:
 
     DYNAMIC_DATA = f"""═══════════════════════════════
 נתוני הערב — {date_str} | שעה: {current_time}
-{'⚠️ חול המועד – פתח ב"מועדים לשמחה"!' if jdate.get('is_chol_hamoed') else ''}
+{f'⚠️ חול המועד – פתח ב"{chol_hamoed_opening(is_motzei, now_il)}"!' if jdate.get('is_chol_hamoed') else ''}
 {'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei and not jdate.get('is_chol_hamoed') else ''}
 {('⚠️ שעת בוקר – פתח ב"בוקר טוב" ולא ב"ערב טוב"!' if now_il.hour < 12 else '⚠️ שעת אחר הצהריים – פתח ב"צהריים טובים" ולא ב"ערב טוב"!') if is_daytime and not jdate.get('is_chol_hamoed') else ''}
 ═══════════════════════════════

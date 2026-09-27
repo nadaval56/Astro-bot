@@ -20,7 +20,7 @@
     המחובר לשבת (ראש השנה), שבו היציאה היא רק יומיים אחרי הכניסה.
 """
 
-import os, sys, json, math, time
+import os, re, sys, json, math, time
 from datetime import datetime, timedelta, date
 from pathlib import Path
 import requests
@@ -1946,6 +1946,23 @@ def _was_mentioned_recently(title: str, history: dict, today: date, days_back: i
     return False
 
 
+def _title_matches(eng_title: str, pattern: str) -> bool:
+    """האם כותרת hebcal היא האירוע ``pattern`` עצמו.
+
+    התאמת קידומת פשוטה שגויה: "Sukkot II (CH''M)" מתחיל ב-"Sukkot I",
+    וכך כל יום של חול המועד הוצג כ"הערב סוכות". ספרה רומית אחרי השם
+    פירושה יום אחר של אותו חג, ולכן לא נחשבת התאמה.
+    """
+    if not eng_title.startswith(pattern):
+        return False
+    rest = eng_title[len(pattern):]
+    if rest == "":
+        return True
+    if rest[0] not in " (":
+        return False
+    return re.match(r"\s*[IVX]+\b", rest) is None
+
+
 def build_upcoming_text(now: datetime, is_motzei: bool = False,
                        history: dict | None = None) -> str:
     today = now.date()
@@ -2013,7 +2030,7 @@ def build_upcoming_text(now: datetime, is_motzei: bool = False,
 
                 matched = None
                 for pattern, (display, evening) in WANTED_EVENTS.items():
-                    if eng_title.startswith(pattern):
+                    if _title_matches(eng_title, pattern):
                         matched = (display or heb_title, evening)
                         break
 

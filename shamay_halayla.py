@@ -75,7 +75,7 @@ MAX_WAIT_MIN        = 120  # מעבר לזה – מדלגים במקום להמ�
 VALID_OPENINGS = [
     "בוקר טוב", "צהריים טובים", "ערב טוב", "לילה טוב",
     "שבוע טוב", "מוצאי שבת", "חודש טוב", "מועדים לשמחה",
-    "שבוע טוב ומועדים לשמחה",
+    "שבוע טוב ומועדים לשמחה", "שבוע טוב וחורף טוב",
 ]
 
 # ── משתני סביבה ──────────────────────────
@@ -118,6 +118,8 @@ def get_jewish_date_info() -> dict:
         "is_last_kiddush_levana": hd == 14,
         "is_erev_rosh_chodesh":   hd == 29,
         "is_chol_hamoed":         (hdate.month, hdate.day) in CHOL_HAMOED,
+        # כ"ג בתשרי – מוצאי שמחת תורה, מתחילים לומר "משיב הרוח"
+        "is_motzei_simchat_torah": (hdate.month, hdate.day) == (7, 23),
     }
 
 
@@ -1330,6 +1332,13 @@ def chol_hamoed_opening(is_motzei: bool, now: datetime) -> str:
     return "מועדים לשמחה"
 
 
+def motzei_opening(jdate: dict) -> str:
+    """ברכת הפתיחה במוצאי שבת/חג (מחוץ לחול המועד)."""
+    if jdate.get("is_motzei_simchat_torah", False):
+        return "שבוע טוב וחורף טוב"
+    return "שבוע טוב"
+
+
 def fix_opening(message: str, payload: dict) -> str:
     now       = datetime.now(ISRAEL_TZ)
     now_hour  = now.hour
@@ -1339,7 +1348,7 @@ def fix_opening(message: str, payload: dict) -> str:
     if jdate.get("is_chol_hamoed", False):
         correct = chol_hamoed_opening(is_motzei, now)
     elif is_motzei:
-        correct = "שבוע טוב"
+        correct = motzei_opening(jdate)
     elif jdate.get("is_rosh_chodesh", False):
         correct = "חודש טוב"
     elif now_hour >= 21 or now_hour < 6:
@@ -1744,7 +1753,7 @@ def generate_message(payload: dict) -> str:
     DYNAMIC_DATA = f"""═══════════════════════════════
 נתוני הערב — {date_str} | שעה: {current_time}
 {f'⚠️ חול המועד – פתח ב"{chol_hamoed_opening(is_motzei, now_il)}"!' if jdate.get('is_chol_hamoed') else ''}
-{'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei and not jdate.get('is_chol_hamoed') else ''}
+{f'⚠️ מוצאי שבת/חג – פתח ב"{motzei_opening(jdate)}"!' if is_motzei and not jdate.get('is_chol_hamoed') else ''}
 {('⚠️ שעת בוקר – פתח ב"בוקר טוב" ולא ב"ערב טוב"!' if now_il.hour < 12 else '⚠️ שעת אחר הצהריים – פתח ב"צהריים טובים" ולא ב"ערב טוב"!') if is_daytime and not jdate.get('is_chol_hamoed') else ''}
 ═══════════════════════════════
 

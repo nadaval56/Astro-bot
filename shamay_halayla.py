@@ -74,7 +74,7 @@ MAX_WAIT_MIN        = 120  # מעבר לזה – מדלגים במקום להמ�
 # ברכות הפתיחה האפשריות – כל הודעה חייבת להתחיל באחת מהן
 VALID_OPENINGS = [
     "בוקר טוב", "צהריים טובים", "ערב טוב", "לילה טוב",
-    "שבוע טוב", "מוצאי שבת", "חודש טוב",
+    "שבוע טוב", "מוצאי שבת", "חודש טוב", "מועדים לשמחה",
 ]
 
 # ── משתני סביבה ──────────────────────────
@@ -116,6 +116,7 @@ def get_jewish_date_info() -> dict:
         "is_kiddush_levana":      3 <= hd <= 14,
         "is_last_kiddush_levana": hd == 14,
         "is_erev_rosh_chodesh":   hd == 29,
+        "is_chol_hamoed":         (hdate.month, hdate.day) in CHOL_HAMOED,
     }
 
 
@@ -1322,7 +1323,11 @@ def fix_opening(message: str, payload: dict) -> str:
     is_motzei = payload.get("is_motzei", False)
     jdate     = payload.get("jdate", {})
 
-    if is_motzei:
+    # חול המועד גובר גם על מוצאי שבת/יו"ט: במוצאי יו"ט ראשון נכנסים לחול
+    # המועד, ו"שבוע טוב" ביום שאינו מוצאי שבת נשמע משונה.
+    if jdate.get("is_chol_hamoed", False):
+        correct = "מועדים לשמחה"
+    elif is_motzei:
         correct = "שבוע טוב"
     elif jdate.get("is_rosh_chodesh", False):
         correct = "חודש טוב"
@@ -1725,8 +1730,9 @@ def generate_message(payload: dict) -> str:
 
     DYNAMIC_DATA = f"""═══════════════════════════════
 נתוני הערב — {date_str} | שעה: {current_time}
-{'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei else ''}
-{('⚠️ שעת בוקר – פתח ב"בוקר טוב" ולא ב"ערב טוב"!' if now_il.hour < 12 else '⚠️ שעת אחר הצהריים – פתח ב"צהריים טובים" ולא ב"ערב טוב"!') if is_daytime else ''}
+{'⚠️ חול המועד – פתח ב"מועדים לשמחה"!' if jdate.get('is_chol_hamoed') else ''}
+{'⚠️ מוצאי שבת/חג – פתח ב"שבוע טוב"!' if is_motzei and not jdate.get('is_chol_hamoed') else ''}
+{('⚠️ שעת בוקר – פתח ב"בוקר טוב" ולא ב"ערב טוב"!' if now_il.hour < 12 else '⚠️ שעת אחר הצהריים – פתח ב"צהריים טובים" ולא ב"ערב טוב"!') if is_daytime and not jdate.get('is_chol_hamoed') else ''}
 ═══════════════════════════════
 
 📅 תאריך עברי עכשיו: {jdate['hebrew_display']}

@@ -1668,6 +1668,14 @@ def quality_check(message: str, payload: dict) -> str:
     sunset       = payload.get("astro", {}).get("sunset", "N/A")
     history_text = payload.get("history_text", "")
 
+    space_news   = payload.get("space_news", "")
+    news_section = (
+        f"\n3. שמות בחדשות: השווה כל שם של משימה/חללית/טלסקופ/סוכנות ומספר בפסקת החדשות "
+        f"לחדשות שנאספו (למטה). אם ההודעה החליפה שם (למשל ג'ונו במקום ג'וס) – תקן לשם "
+        f"שבחדשות. אל תוסיף ידיעות ואל תשנה דבר אחר.\nהחדשות שנאספו:\n{space_news[:2500]}"
+        if space_news and "אין חדשות" not in space_news else ""
+    )
+
     history_section = (
         f"\nהיסטוריה אחרונה (בדוק חזרות):\n{history_text[:400]}"
         if history_text and history_text != "אין היסטוריה – זו ההודעה הראשונה."
@@ -1675,12 +1683,12 @@ def quality_check(message: str, payload: dict) -> str:
     )
 
     content = (
-        f"אתה בודק עובדתי של הודעה. שתי משימות בלבד:\n\n"
+        f"אתה בודק עובדתי של הודעה. {'שלוש' if news_section else 'שתי'} משימות בלבד:\n\n"
         f"1. 'הלילה': שקיעה היום ב-{sunset}. "
         f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
         f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
         f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
-        f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
+        f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}{news_section}\n\n"
         f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
         f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
         f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
@@ -2680,9 +2688,11 @@ def main():
 
     date_str = now.strftime("%d/%m/%Y")
 
+    # 5 הימים האחרונים לפי תאריך (המפתח הוא YYYY-MM-DD). קודם המיון היה לפי
+    # _message_length – כלומר 5 ההודעות *הארוכות*, וחדשות מאתמול חזרו.
     recent_news = [
         v.get("space_news", "")
-        for v in sorted(history.values(), key=lambda x: x.get("_message_length", 0))[-5:]
+        for _, v in sorted(history.items())[-5:]
         if v.get("space_news")
     ]
 

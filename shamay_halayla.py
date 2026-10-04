@@ -20,7 +20,7 @@
     המחובר לשבת (ראש השנה), שבו היציאה היא רק יומיים אחרי הכניסה.
 """
 
-import os, re, sys, json, math, time
+import os, re, sys, json, math, time, shutil, subprocess, tempfile
 from datetime import datetime, timedelta, date
 from pathlib import Path
 import requests
@@ -48,6 +48,21 @@ CLOUD_POOR        = 80   # מעורפל – כבד, אך ייתכן פתח
 CLAUDE_MODEL         = "claude-sonnet-5"   # gather, proofread, summary
 CLAUDE_MODEL_WRITER  = "claude-opus-5"     # generate_message – כתיבה בלבד
 CLAUDE_API   = "https://api.anthropic.com/v1/messages"
+
+# ── מסלול הקריאה ל-Claude ──────────────────
+# ראשי: Claude Code CLI (`claude -p`) עם CLAUDE_CODE_OAUTH_TOKEN – רץ על מנוי
+#       ה-Max, בלי חיוב API. הטוקן מופק פעם אחת ב-`claude setup-token`.
+# גיבוי: Messages API ישיר עם ANTHROPIC_API_KEY – רק אם ה-CLI נכשל
+#       (מכסת המנוי נגמרה, טוקן פג, CLI לא מותקן).
+# CLAUDE_BACKEND: auto (ברירת מחדל) / cli (בלי גיבוי) / api (בלי CLI).
+CLAUDE_BACKEND = os.environ.get("CLAUDE_BACKEND", "auto").lower()
+
+# מחליף את הנחיית המערכת של Claude Code (שבנויה לעבודה על קוד). ב-API לא
+# הייתה הנחיית מערכת כלל – כל ההנחיות יושבות בגוף הבקשה – ולכן כאן היא מינימלית.
+CLI_SYSTEM_PROMPT = (
+    "You are a careful assistant working for a Hebrew astronomy WhatsApp bot. "
+    "Follow the user's instructions exactly and reply with the requested output only."
+)
 
 # ── חלון שליחה מותר (שעון ישראל) ──────────
 # ריצה שנופלת מחוץ לחלון (22:30 בלילה עד 09:00 בבוקר) מתבטלת אוטומטית.
@@ -79,7 +94,7 @@ VALID_OPENINGS = [
 ]
 
 # ── משתני סביבה ──────────────────────────
-ANTHROPIC_API_KEY      = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")   # גיבוי בלבד
 GREEN_API_INSTANCE     = os.environ["GREEN_API_INSTANCE"]
 GREEN_API_TOKEN        = os.environ["GREEN_API_TOKEN"]
 WHATSAPP_GROUP_ID      = os.environ["WHATSAPP_GROUP_ID"]
@@ -239,6 +254,46 @@ def get_cloud_cover() -> int | None:
     except Exception as e:
         print(f"⚠️ לא הצלחתי למשוך נתוני עננות: {e}")
         return None
+
+
+HEBREW_WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+
+
+def get_cloud_outlook(days: int = 3) -> list[str]:
+    """עננות ממוצעת ב-20:00–23:00 לערבים הבאים – לערב מעונן, כדי שההודעה
+    תוכל לומר מתי צפוי להתבהר (rules.md: "ספר מה מחכה בימים הקרובים")."""
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly=cloudcover"
+        f"&timezone=Asia%2FJerusalem"
+        f"&forecast_days={days + 1}"
+    )
+    try:
+        for attempt in range(2):
+            try:
+                r = requests.get(url, timeout=15)
+                r.raise_for_status()
+                break
+            except requests.exceptions.RequestException:
+                if attempt:
+                    raise
+                time.sleep(3)
+        data = r.json()
+        by_day = {}
+        for t, c in zip(data["hourly"]["time"], data["hourly"]["cloudcover"]):
+            day, hour = t.split("T")
+            if 20 <= int(hour[:2]) <= 23 and c is not None:
+                by_day.setdefault(day, []).append(c)
+        out = []
+        for day in sorted(by_day)[1:days + 1]:   # בלי הערב הנוכחי
+            d = datetime.strptime(day, "%Y-%m-%d")
+            pct = round(sum(by_day[day]) / len(by_day[day]))
+            out.append(f"יום {HEBREW_WEEKDAYS[d.weekday()]} ({d.day}.{d.month}): {pct}%")
+        return out
+    except Exception as e:
+        print(f"⚠️ לא הצלחתי למשוך תחזית עננות לימים הבאים: {e}")
+        return []
 
 
 def cloud_label(pct: int) -> tuple[str, str]:
@@ -523,7 +578,10 @@ def get_station_passes() -> list[str]:
 HISTORY_FILE = Path("message_history.json")
 HISTORY_DAYS = 7
 
-DIRECTION_NAMES = ["צפון","צ-מ","מזרח","ד-מ","דרום","ד-מ","מערב","צ-מ"]
+# שמות מלאים: הקיצור הקודם ("ד-מ"/"צ-מ") שימש גם לדרום-מזרח וגם לדרום-מערב,
+# והמודל ניחש את הכיוון.
+DIRECTION_NAMES = ["צפון", "צפון-מזרח", "מזרח", "דרום-מזרח",
+                   "דרום", "דרום-מערב", "מערב", "צפון-מערב"]
 
 
 # ══════════════════════════════════════════
@@ -598,35 +656,131 @@ def claude_text(resp: dict) -> str:
     ).strip()
 
 
-def extract_summary_from_message(message: str, payload: dict) -> dict:
+def cli_enabled() -> bool:
+    return CLAUDE_BACKEND != "api" and shutil.which("claude") is not None
+
+
+def api_enabled() -> bool:
+    return CLAUDE_BACKEND != "cli" and bool(ANTHROPIC_API_KEY)
+
+
+def content_to_text(content) -> str:
+    """גוף הודעה בפורמט ה-API (מחרוזת או רשימת בלוקים) → מחרוזת אחת ל-CLI."""
+    if isinstance(content, str):
+        return content
+    return "\n\n".join(b["text"] for b in content if b.get("type") == "text")
+
+
+def claude_cli(prompt: str, *, model: str, effort: str, timeout: int,
+               web_search: bool = False, attempts: int = 1) -> str:
+    """קריאה ל-Claude דרך Claude Code CLI (על מנוי ה-Max).
+
+    מחזיר את הטקסט, או "" בכל כישלון – והקורא נופל ל-API.
+    כלים: בלי כלים בכלל, או WebSearch בלבד – כדי שהסוכן לא יקרא קבצים
+    ולא יריץ פקודות, ויתנהג כמו בקשת API בודדת.
+    """
+    cmd = [
+        "claude", "-p",
+        "--model", model,
+        "--effort", effort,
+        "--output-format", "json",
+        "--system-prompt", CLI_SYSTEM_PROMPT,
+        "--tools", "WebSearch" if web_search else "",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+    ]
+    if web_search:
+        cmd += ["--allowedTools", "WebSearch"]
+    # ANTHROPIC_API_KEY בסביבה גובר על טוקן המנוי – ואז ה-CLI היה מחייב את
+    # ה-API בשקט. לכן הוא מוסר מהסביבה של התהליך.
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(30)
+        try:
+            p = subprocess.run(
+                cmd, input=prompt, capture_output=True, text=True,
+                timeout=timeout, env=env, cwd=tempfile.gettempdir(),
+            )
+        except subprocess.TimeoutExpired:
+            print(f"⚠️ Claude Code: timeout אחרי {timeout} שניות")
+            continue
+        except OSError as e:
+            print(f"⚠️ Claude Code לא הופעל: {e}")
+            return ""
+        try:
+            data = json.loads(p.stdout)
+        except ValueError:
+            print(f"⚠️ Claude Code: פלט לא תקין (exit {p.returncode}): "
+                  f"{(p.stderr or p.stdout)[:300]}")
+            continue
+        if data.get("is_error") or data.get("subtype") != "success":
+            print(f"⚠️ Claude Code נכשל: {data.get('subtype')} – "
+                  f"{str(data.get('result'))[:300]}")
+            continue
+        if data.get("stop_reason") == "refusal":
+            print("⚠️ Claude סירב לבקשה (Claude Code)")
+            return ""
+        text = (data.get("result") or "").strip()
+        print(f"🖥️ Claude Code ({model}, effort={effort}): "
+              f"{data.get('num_turns')} סבבים, "
+              f"{data.get('duration_ms', 0) / 1000:.0f} שניות")
+        if text:
+            return text
+    return ""
+
+
+def ask_claude(content, *, model: str, effort: str, max_tokens: int,
+               timeout: int) -> str:
+    """בקשה פשוטה (בלי כלים): CLI על המנוי, ובכישלון – API כגיבוי.
+    זורק חריגה אם אף מסלול לא הצליח; הקוראים כבר מטפלים בזה."""
+    if cli_enabled():
+        text = claude_cli(content_to_text(content), model=model,
+                          effort=effort, timeout=timeout)
+        if text:
+            return text
+        print("↩️ Claude Code נכשל – עובר ל-API")
+    if not api_enabled():
+        raise RuntimeError("אין מסלול זמין ל-Claude (CLI נכשל ואין ANTHROPIC_API_KEY)")
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
     }
     body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    2000,
+        "model":         model,
+        "max_tokens":    max_tokens,
         "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "low"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                "Summarize this astronomy WhatsApp message in a JSON object.\n"
-                "Rules: English keys only, short Hebrew values (max 10 words each).\n"
-                "Use these keys: weather, moon, planets, iss, space_news, jewish\n"
-                "IMPORTANT: this_day_history key = ONLY for 'X years ago today' anniversary events.\n"
-                "Current news/discoveries go in space_news, NOT in this_day_history.\n"
-                "Return ONLY the JSON object, no markdown, no explanation.\n\n"
-                f"Message:\n{message[:1500]}"
-            )
-        }]
+        "output_config": {"effort": effort},
+        "messages":      [{"role": "user", "content": content}],
     }
+    r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=timeout)
+    r.raise_for_status()
+    return claude_text(r.json())
+
+
+def strip_sources(text: str) -> str:
+    """כלי ה-WebSearch של Claude Code מצרף רשימת "Sources:" בסוף. ב-API היא
+    לא הייתה, ואין צורך להעביר קישורים לכותב – לכן היא נחתכת."""
+    m = re.search(r'\n\s*\**(Sources|מקורות)\**:?\**\s*\n', text)
+    return text[:m.start()].strip() if m else text
+
+
+def extract_summary_from_message(message: str, payload: dict) -> dict:
+    content = (
+        "Summarize this astronomy WhatsApp message in a JSON object.\n"
+        "Rules: English keys only, short Hebrew values (max 10 words each).\n"
+        "Use these keys: weather, moon, planets, iss, space_news, jewish\n"
+        "IMPORTANT: this_day_history key = ONLY for 'X years ago today' anniversary events.\n"
+        "Current news/discoveries go in space_news, NOT in this_day_history.\n"
+        "Return ONLY the JSON object, no markdown, no explanation.\n\n"
+        f"Message:\n{message[:1500]}"
+    )
     raw = ""
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=90)
-        r.raise_for_status()
-        raw = claude_text(r.json())
+        raw = ask_claude(content, model=CLAUDE_MODEL, effort="low",
+                         max_tokens=2000, timeout=120)
         raw = raw.replace("```json", "").replace("```", "").strip()
         start = raw.find('{')
         end   = raw.rfind('}')
@@ -836,9 +990,32 @@ def get_astronomical_data() -> dict:
             o.date = dt_utc
             return o
 
-        obs_dark   = _obs_at(dark_utc)   if dark_utc   else _obs_at(evening_utc)
+        # ריצה שמתחילה אחרי שכבר החשיך (בחורף ההחשכה ~17:20 והריצה ב-19:30)
+        # – הגבהים מחושבים לשעת הריצה, אחרת ההודעה מפנה לשעה שכבר עברה.
+        run_now     = datetime.now(ISRAEL_TZ)
+        already_dark = bool(dark_dt and run_now > dark_dt)
+        if already_dark:
+            obs_dark  = _obs_at(run_now.astimezone(pytz.utc).replace(tzinfo=None))
+            ref_label = run_now.strftime("%H:%M")
+            ref_when  = "גובה עכשיו, כשכבר חשוך"
+        else:
+            obs_dark  = _obs_at(dark_utc) if dark_utc else _obs_at(evening_utc)
+            ref_label = dark_start if dark_dt else "19:30"
+            ref_when  = "נראה משהשמיים מתכהים"
         obs_sunset = _obs_at(sunset_utc) if sunset_dt  else obs_dark
-        ref_label  = dark_start if dark_dt else "19:30"
+
+        def _culmination(cls):
+            """שעת השיא (מעבר מרידיאן) הקרובה והגובה בה – לכוכב שעדיין עולה."""
+            try:
+                o  = _obs_at(obs_dark.date)
+                tr = o.next_transit(cls(o))
+                o.date = tr
+                alt = round(math.degrees(float(cls(o).alt)))
+                t = (tr.datetime().replace(tzinfo=pytz.utc)
+                     .astimezone(ISRAEL_TZ).strftime("%H:%M"))
+                return t, alt
+            except Exception:
+                return None, None
 
         planets_visible = []
         evening_planet_names = set()  # למניעת דיווח כפול ברשימת הלילה/בוקר
@@ -855,6 +1032,7 @@ def get_astronomical_data() -> dict:
             # שעת שקיעת הכוכב הקרובה אחרי השקיעה (החלון בערב במערב)
             set_str = None
             mins_after_dark = None
+            ps_dt = None
             try:
                 ps_dt = (obs_sunset.next_setting(cls(obs_sunset)).datetime()
                          .replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ))
@@ -862,7 +1040,14 @@ def get_astronomical_data() -> dict:
                 if dark_dt:
                     mins_after_dark = int((ps_dt - dark_dt).total_seconds() / 60)
             except Exception:
-                pass
+                ps_dt = None
+
+            # כוכב ששקע כבר לפני שעת הריצה (ריצת ערב שהתעכבה, נוגה בשקיעה
+            # מוקדמת) – לא מעבירים אותו למודל בכלל. הוראה בפרומפט לא הספיקה:
+            # המודל המשיך לכתוב "נוגה שוקעת ב-19:07" בהודעה שנשלחת ב-19:30.
+            if ps_dt is not None and ps_dt <= run_now:
+                evening_planet_names.add(name)
+                continue
 
             # גובה בשקיעה – לזיהוי כוכב שהיה מעל האופק אך שוקע לפני שמחשיך
             alt_sunset = None
@@ -873,11 +1058,28 @@ def get_astronomical_data() -> dict:
 
             if alt_dark > 10:
                 desc = (f"{name} – גובה {round(alt_dark)}° ב{direction}, בהירות {mag}{mag_hint} "
-                        f"(נראה משהשמיים מתכהים, ~{ref_label})")
+                        f"({ref_when}, ~{ref_label})")
+                if az < 180:
+                    c_t, c_alt = _culmination(cls)
+                    if c_t:
+                        desc += f"; עולה ומגיע לשיא ~{c_alt}° בדרום ב-{c_t}"
                 if set_str:
                     desc += f"; שוקע ב-{set_str}"
                     if mins_after_dark is not None and mins_after_dark <= 60:
                         desc += " → ⚠️ חלון צר! עדיף להתכוונן מיד כשמחשיך"
+                planets_visible.append(desc)
+                evening_planet_names.add(name)
+
+            elif alt_dark > 0 and az < 180:
+                # נמוך אבל *במזרח* – הכוכב עולה ומטפס במהלך הלילה (למשל
+                # כוכב בניגוד). "חלון קצר" נכון רק לכוכב ששוקע במערב.
+                c_t, c_alt = _culmination(cls)
+                desc = (f"{name} – נמוך ({round(alt_dark)}°) ב{direction} (~{ref_label}), "
+                        f"בהירות {mag}{mag_hint}; עולה ומטפס – "
+                        + (f"מגיע לשיא ~{c_alt}° בדרום ב-{c_t}, ואחר כך יורד מערבה"
+                           if c_t else "נוח יותר לצפייה בהמשך הערב"))
+                if set_str:
+                    desc += f"; שוקע רק ב-{set_str}"
                 planets_visible.append(desc)
                 evening_planet_names.add(name)
 
@@ -997,7 +1199,34 @@ def get_astronomical_data() -> dict:
         except Exception:
             pass
 
+        # ── ניגוד של כוכב לכת חיצוני (רק אם בתוך ±3 ימים) ──
+        # הניגוד הגיע עד כה רק מחיפוש החדשות, והמודל כתב פעם "היום", פעם
+        # "אתמול" ופעם השמיט. כאן הוא מחושב: היום שבו המרחק הזוויתי מהשמש
+        # מרבי (בגלל נטיית המסלול השיא הוא ~177° ולא 180° בדיוק).
+        opposition_events = []
+        try:
+            for p_name, p_cls in (("מאדים", ephem.Mars), ("צדק", ephem.Jupiter),
+                                  ("שבתאי", ephem.Saturn), ("אורנוס", ephem.Uranus),
+                                  ("נפטון", ephem.Neptune)):
+                days = range(-4, 5)
+                elongs = [abs(math.degrees(float(p_cls(ephem.Date(evening_utc) + d).elong)))
+                          for d in days]
+                i = max(range(len(elongs)), key=elongs.__getitem__)
+                if 0 < i < len(elongs) - 1 and elongs[i] > 170:
+                    d = days[i]
+                    when = ("היום"  if d ==  0 else
+                            "מחר"   if d ==  1 else
+                            "אתמול" if d == -1 else
+                            f"בעוד {d} ימים" if d > 0 else
+                            f"לפני {abs(d)} ימים")
+                    opposition_events.append(
+                        f"{p_name} בניגוד (מול השמש) – {when}: נראה כל הלילה, "
+                        f"עולה בשקיעה ושוקע בזריחה, בבהירות השנתית המרבית")
+        except Exception:
+            pass
+
         return {
+            "opposition_events":    opposition_events,
             "moon_pct":             pct,
             "moon_phase":           phase_name,
             "moon_age":             round(age, 1),
@@ -1015,6 +1244,8 @@ def get_astronomical_data() -> dict:
             "sunset":               sunset,
             "sunrise":              sunrise,
             "dark_start":           dark_start,
+            "already_dark":         already_dark,
+            "planets_ref_time":     ref_label,
             "dawn_start":           dawn_start,
         }
 
@@ -1266,7 +1497,7 @@ def get_visible_constellations(now: datetime | None = None) -> list[str]:
 # 5. יצירת ההודעה עם Claude Opus
 # ══════════════════════════════════════════
 
-from auto_fix import auto_fix
+from auto_fix import auto_fix, fix_negative_magnitude
 
 
 def strip_preamble(message: str) -> str:
@@ -1437,42 +1668,35 @@ def quality_check(message: str, payload: dict) -> str:
     sunset       = payload.get("astro", {}).get("sunset", "N/A")
     history_text = payload.get("history_text", "")
 
+    space_news   = payload.get("space_news", "")
+    news_section = (
+        f"\n3. שמות בחדשות: השווה כל שם של משימה/חללית/טלסקופ/סוכנות ומספר בפסקת החדשות "
+        f"לחדשות שנאספו (למטה). אם ההודעה החליפה שם (למשל ג'ונו במקום ג'וס) – תקן לשם "
+        f"שבחדשות. אל תוסיף ידיעות ואל תשנה דבר אחר.\nהחדשות שנאספו:\n{space_news[:2500]}"
+        if space_news and "אין חדשות" not in space_news else ""
+    )
+
     history_section = (
         f"\nהיסטוריה אחרונה (בדוק חזרות):\n{history_text[:400]}"
         if history_text and history_text != "אין היסטוריה – זו ההודעה הראשונה."
         else ""
     )
 
-    headers = {
-        "x-api-key":         ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-    }
-    body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    4000,
-        "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "medium"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                f"אתה בודק עובדתי של הודעה. שתי משימות בלבד:\n\n"
-                f"1. 'הלילה': שקיעה היום ב-{sunset}. "
-                f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
-                f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
-                f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
-                f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
-                f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
-                f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
-                f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
-                f"ההודעה:\n{message}"
-            )
-        }]
-    }
+    content = (
+        f"אתה בודק עובדתי של הודעה. {'שלוש' if news_section else 'שתי'} משימות בלבד:\n\n"
+        f"1. 'הלילה': שקיעה היום ב-{sunset}. "
+        f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
+        f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
+        f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
+        f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}{news_section}\n\n"
+        f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
+        f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
+        f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
+        f"ההודעה:\n{message}"
+    )
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
-        r.raise_for_status()
-        result = strip_preamble(claude_text(r.json()))
+        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="medium",
+                                           max_tokens=4000, timeout=180))
         if result and len(result) >= len(message) * 0.85:
             print("✅ quality_check: הושלם")
             return result
@@ -1484,50 +1708,38 @@ def quality_check(message: str, payload: dict) -> str:
 
 
 def proofread_hebrew(message: str) -> str:
-    headers = {
-        "x-api-key":         ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-    }
-    body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    4000,
-        "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "low"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                "אתה מגיה עברית מקצועי. תפקידך לתקן שגיאות לשון בלבד.\n"
-                "חובה לשמור על:\n"
-                "• כל התוכן, המידע והעובדות – ללא שינוי\n"
-                "• כל האימוג'י\n"
-                "• כל עיצוב הטקסט (*בולד*, שורות ריקות)\n"
-                "• אורך ההודעה – אל תקצר ואל תוסיף\n\n"
-                "תקן רק:\n"
-                "• זכר/נקבה שגוי\n"
-                "• 'לילה' הוא שם עצם ממין זכר: 'לילה חשוך' ולא 'לילה חשוכה', "
-                "'הלילה בהיר' ולא 'הלילה בהירה', 'לילות חשוכים' ולא 'לילות חשוכות'. "
-                "'שמיים' זכר רבים: 'שמיים בהירים' ולא 'שמיים בהירות'\n"
-                "• 'תחילת הלילה חשוכה' – מבנה צורם, נסח מחדש ואל תתקן ל'חשוך': "
-                "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
-                "• הטיות שגויות של פעלים ושמות\n"
-                "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
-                "• מבנה משפט מסורבל\n"
-                "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
-                "• 'דו-עינית' → 'משקפת'\n"
-                "• 'בראייה ערומה' / 'בעין רגילה' → 'בעין בלתי מזוינת'\n"
-                "• מיילים → המר לקילומטרים (1 מייל = 1.609 ק\"מ)\n"
-                "• 'קרייטר' / 'קרטר' → 'מכתש'\n"
-                "• ו/ה/ב/כ/ל/מ/ש לפני *בולד* – כנס לפנים: *ונוגה* לא ו*נוגה*\n\n"
-                "החזר את ההודעה המתוקנת בלבד, ללא הסברים.\n\n"
-                f"ההודעה:\n{message}"
-            )
-        }]
-    }
+    content = (
+        "אתה מגיה עברית מקצועי. תפקידך לתקן שגיאות לשון בלבד.\n"
+        "חובה לשמור על:\n"
+        "• כל התוכן, המידע והעובדות – ללא שינוי\n"
+        "• כל האימוג'י\n"
+        "• כל עיצוב הטקסט (*בולד*, שורות ריקות)\n"
+        "• אורך ההודעה – אל תקצר ואל תוסיף\n\n"
+        "תקן רק:\n"
+        "• זכר/נקבה שגוי\n"
+        "• 'לילה' הוא שם עצם ממין זכר: 'לילה חשוך' ולא 'לילה חשוכה', "
+        "'הלילה בהיר' ולא 'הלילה בהירה', 'לילות חשוכים' ולא 'לילות חשוכות'. "
+        "'שמיים' זכר רבים: 'שמיים בהירים' ולא 'שמיים בהירות'\n"
+        "• 'תחילת הלילה חשוכה' – מבנה צורם, נסח מחדש ואל תתקן ל'חשוך': "
+        "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
+        "• הטיות שגויות של פעלים ושמות\n"
+        "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"        "• שם לועזי של משימה/טלסקופ/גוף שמי שיש לו תעתיק עברי – בעברית: "
+        "'Chang'e-6' → 'צ'אנג'ה 6', 'Roman' → 'רומן' (בלי התוספת הלועזית בסוגריים). "
+        "כינוי קטלוגי בלבד (IC 348, C/2025 A6) נשאר\n"
+        "• שגיאות כתיב והקלדה (למשל 'וטופס' במקום 'ומטפס')\n"
+        "• מבנה משפט מסורבל\n"
+        "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
+        "• 'דו-עינית' → 'משקפת'\n"
+        "• 'בראייה ערומה' / 'בעין רגילה' → 'בעין בלתי מזוינת'\n"
+        "• מיילים → המר לקילומטרים (1 מייל = 1.609 ק\"מ)\n"
+        "• 'קרייטר' / 'קרטר' → 'מכתש'\n"
+        "• ו/ה/ב/כ/ל/מ/ש לפני *בולד* – כנס לפנים: *ונוגה* לא ו*נוגה*\n\n"
+        "החזר את ההודעה המתוקנת בלבד, ללא הסברים.\n\n"
+        f"ההודעה:\n{message}"
+    )
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
-        r.raise_for_status()
-        result = strip_preamble(claude_text(r.json()))
+        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="medium",
+                                           max_tokens=4000, timeout=180))
         if not result:
             print("⚠️ הגהה החזירה תשובה ריקה – שולח הודעה מקורית")
             return message
@@ -1604,6 +1816,17 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 ללא עיצוב, ללא סגנון, ללא המלצות. רק עובדות."""}]
     }
 
+    # ראשי: Claude Code עם WebSearch בלבד. הסוכן מנהל את סבבי החיפוש בעצמו,
+    # ולכן אין כאן טיפול ב-pause_turn; ה-timeout גבוה מבקשת API בודדת.
+    if cli_enabled():
+        text = claude_cli(body["messages"][0]["content"], model=CLAUDE_MODEL,
+                          effort="medium", timeout=480, web_search=True)
+        if text:
+            return strip_sources(text)
+        print("↩️ Claude Code נכשל באיסוף חדשות – עובר ל-API")
+    if not api_enabled():
+        return "אין חדשות חלל זמינות"
+
     time.sleep(3)
     messages = [body["messages"][0].copy()]
     for attempt in range(5):
@@ -1672,6 +1895,9 @@ def generate_message(payload: dict) -> str:
         cloud_block = "🌤 עננות: אין נתון זמין – אל תתייחס לעננות או למצב השמיים בהודעה."
     else:
         cloud_block = f"🌤 עננות: {cloud_pct}%\n   הערכה: {cloud_desc}"
+        if payload.get("cloud_outlook"):
+            cloud_block += ("\n   תחזית עננות לערבים הבאים: " + " | ".join(payload["cloud_outlook"])
+                            + "\n   ⓘ ערב מעונן – אל תדכא: ציין בקצרה מתי צפוי להתבהר לפי התחזית.")
     astro        = payload["astro"]
     iss          = payload["iss"]
     j_events     = payload["jewish_events"]
@@ -1773,21 +1999,24 @@ def generate_message(payload: dict) -> str:
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
-🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
+{f"🌌 כבר חשוך – השמיים התכהו ב-{astro.get('dark_start','N/A')}, לפני שעת ההודעה. אל תפנה את הקוראים לשעת ההחשכה; כתוב על מה שנראה מעכשיו." if astro.get('already_dark') else f"🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה)."}
+{chr(10).join("🪐 " + e + " – מחושב, זה התאריך הנכון גם אם בחדשות כתוב אחרת." for e in astro.get('opposition_events', []))}
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
-🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
+🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב ל-~{astro.get('planets_ref_time', astro.get('dark_start','N/A'))}{" – שעת ההודעה" if astro.get('already_dark') else ", הרגע שהשמיים מתכהים, ולא לשקיעה"}):
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק בערב כשהשמיים מתכהים"}
    ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר.
 {(f'''🌙 כוכבי לכת שעולים במהלך הלילה / לפנות בוקר – נראות אמיתית במזרח (גובה מחושב לתחילת דמדומי הבוקר, ~{astro.get('dawn_start','N/A')}):
 {chr(10).join(astro['planets_night'])}
    ⓘ אלה כוכבים שעולים במזרח *אחרי* שהערב מתקדם – חלקם כבר בשעת לילה נוחה (ראה "עולה במזרח ב-..."), אחרים ממש לפנות בוקר. אם יש כאן כוכב בולט (מאדים/צדק/שבתאי, או נוגה כ"כוכב השחר") שלב משפט קצר: הכיוון (מזרח), שעת הזריחה שלו, והגובה לפנות בוקר. אל תפרט על כל כוכב – בחר את הבולט/ים. הפרד בבירור בין תצפית הלילה/בוקר הזו לתצפית הערב.''') if astro.get('planets_night') else ''}
+   ⚠️ השעה עכשיו {current_time}: כוכב לכת ששעת השקיעה שלו כבר עברה – אל תזכיר אותו כלל (גם לא "שקע מוקדם"). כתוב רק על מה שעוד אפשר לראות מעכשיו והלאה.
    ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימות למעלה (ערב, לילה או בוקר). כוכב שאינו מופיע באף רשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
    ⓘ כשכוכב מסומן כ"עמום" (כמו אורנוס/נפטון) – *אל תשמיט* את ההערה שדרושים משקפת/טלסקופ ושמיים חשוכים. אל תתאר כוכב עמום כ"בולט" או "זוהר" – הוא יעד לצופים מנוסים בלבד.
 
-🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
+🌌 קבוצות כוכבים בולטות בערב (לפי עונה) – המיקומים נכונים ל-~21:00 בלבד:
 {constellations_block}
    ⓘ אם הלילה חשוך (עננות נמוכה + אין ירח מציק) – שלב משפט קצר על קבוצות הכוכבים: ציין כיוון אחד-שניים בולטים. אל תפרט יותר מדי, רק מסגרת לתצפית.
+   ⚠️ אל תצמיד את המיקומים האלה לשעה אחרת – לא "אחרי שהירח ישקע", לא "לפנות בוקר". בשעות מאוחרות הכיוונים כבר אחרים.
 
 🛸 מעברי תחנות חלל (פתחים תמיד עם הטקסט העברי, לא עם "ISS" באנגלית):
 {chr(10).join(iss) if iss else "אין מעברים הלילה"}
@@ -1805,7 +2034,8 @@ def generate_message(payload: dict) -> str:
    ⓘ חובה: אם בנתונים יש סעיף "ביום זה בהיסטוריה" – שלב **משפט אחד** (לא יותר) על האירוע ההיסטורי בתוך פסקת החדשות. זו פינה קבועה של הבוט – אל תדלג עליה.
 
 ⚠️ חשוב: אל תסיים ב"שאו מרום עיניכם..." – שורת החתימה מתווספת אוטומטית.
-⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית."""
+⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית.
+⚠️ אורך: עד 150 מילה בגוף ההודעה. בחר את הפריטים המעניינים – לא חייבים להכניס את כל הנתונים."""
 
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
@@ -1835,6 +2065,18 @@ def generate_message(payload: dict) -> str:
         "output_config": {"effort": "high"},
         "messages":      [initial_message],
     }
+
+    # ראשי: Claude Code בלי כלים. כאן אין fallback להודעה – כישלון מפיל את
+    # הריצה – ולכן שני ניסיונות לפני מעבר ל-API.
+    if cli_enabled():
+        text = claude_cli(content_to_text(initial_message["content"]),
+                          model=CLAUDE_MODEL_WRITER, effort="high",
+                          timeout=420, attempts=2)
+        if text:
+            return strip_preamble(text)
+        print("↩️ Claude Code נכשל בכתיבת ההודעה – עובר ל-API")
+    if not api_enabled():
+        raise RuntimeError("כתיבת ההודעה נכשלה: Claude Code נכשל ואין ANTHROPIC_API_KEY לגיבוי")
 
     messages = [initial_message]
 
@@ -2413,10 +2655,13 @@ def main():
 
     print("📡 מושך נתוני עננות...")
     cloud_pct            = get_cloud_cover()
+    cloud_outlook        = []
     if cloud_pct is None:
         cloud_status, cloud_desc = "unknown", None
     else:
         cloud_status, cloud_desc = cloud_label(cloud_pct)
+        if cloud_pct >= CLOUD_POOR:
+            cloud_outlook = get_cloud_outlook()
 
     print("🔭 מחשב נתוני ירח וכוכבים (ל-19:30 ישראל)...")
     astro = get_astronomical_data()
@@ -2443,9 +2688,11 @@ def main():
 
     date_str = now.strftime("%d/%m/%Y")
 
+    # 5 הימים האחרונים לפי תאריך (המפתח הוא YYYY-MM-DD). קודם המיון היה לפי
+    # _message_length – כלומר 5 ההודעות *הארוכות*, וחדשות מאתמול חזרו.
     recent_news = [
         v.get("space_news", "")
-        for v in sorted(history.values(), key=lambda x: x.get("_message_length", 0))[-5:]
+        for _, v in sorted(history.items())[-5:]
         if v.get("space_news")
     ]
 
@@ -2466,6 +2713,7 @@ def main():
         "cloud_pct":     cloud_pct,
         "cloud_status":  cloud_status,
         "cloud_desc":    cloud_desc,
+        "cloud_outlook": cloud_outlook,
         "astro":         astro,
         "iss":           iss,
         "jewish_events": j_events,
@@ -2504,6 +2752,7 @@ def main():
 
     print("✳️ מנרמל הדגשות בולד לוואטסאפ...")
     message = fix_whatsapp_bold(message)
+    message = fix_negative_magnitude(message)
 
     print("\n" + "═"*50)
     print(message)

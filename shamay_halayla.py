@@ -953,6 +953,7 @@ def get_astronomical_data() -> dict:
 
         planets_visible = []
         evening_planet_names = set()  # למניעת דיווח כפול ברשימת הלילה/בוקר
+        run_now = datetime.now(ISRAEL_TZ)
         for name, cls in planet_defs:
             b_dark    = cls(obs_dark)
             alt_dark  = math.degrees(float(b_dark.alt))
@@ -966,6 +967,7 @@ def get_astronomical_data() -> dict:
             # שעת שקיעת הכוכב הקרובה אחרי השקיעה (החלון בערב במערב)
             set_str = None
             mins_after_dark = None
+            ps_dt = None
             try:
                 ps_dt = (obs_sunset.next_setting(cls(obs_sunset)).datetime()
                          .replace(tzinfo=pytz.utc).astimezone(ISRAEL_TZ))
@@ -973,7 +975,14 @@ def get_astronomical_data() -> dict:
                 if dark_dt:
                     mins_after_dark = int((ps_dt - dark_dt).total_seconds() / 60)
             except Exception:
-                pass
+                ps_dt = None
+
+            # כוכב ששקע כבר לפני שעת הריצה (ריצת ערב שהתעכבה, נוגה בשקיעה
+            # מוקדמת) – לא מעבירים אותו למודל בכלל. הוראה בפרומפט לא הספיקה:
+            # המודל המשיך לכתוב "נוגה שוקעת ב-19:07" בהודעה שנשלחת ב-19:30.
+            if ps_dt is not None and ps_dt <= run_now:
+                evening_planet_names.add(name)
+                continue
 
             # גובה בשקיעה – לזיהוי כוכב שהיה מעל האופק אך שוקע לפני שמחשיך
             alt_sunset = None
@@ -989,6 +998,17 @@ def get_astronomical_data() -> dict:
                     desc += f"; שוקע ב-{set_str}"
                     if mins_after_dark is not None and mins_after_dark <= 60:
                         desc += " → ⚠️ חלון צר! עדיף להתכוונן מיד כשמחשיך"
+                planets_visible.append(desc)
+                evening_planet_names.add(name)
+
+            elif alt_dark > 0 and az < 180:
+                # נמוך אבל *במזרח* – הכוכב עולה ומטפס במהלך הלילה (למשל
+                # כוכב בניגוד). "חלון קצר" נכון רק לכוכב ששוקע במערב.
+                desc = (f"{name} – נמוך ({round(alt_dark)}°) ב{direction} כשהשמיים מתכהים "
+                        f"(~{ref_label}), בהירות {mag}{mag_hint}; עולה ומטפס במהלך הלילה – "
+                        f"נוח יותר לצפייה בהמשך הערב")
+                if set_str:
+                    desc += f"; שוקע רק ב-{set_str}"
                 planets_visible.append(desc)
                 evening_planet_names.add(name)
 
@@ -1377,7 +1397,7 @@ def get_visible_constellations(now: datetime | None = None) -> list[str]:
 # 5. יצירת ההודעה עם Claude Opus
 # ══════════════════════════════════════════
 
-from auto_fix import auto_fix
+from auto_fix import auto_fix, fix_negative_magnitude
 
 
 def strip_preamble(message: str) -> str:
@@ -1596,6 +1616,7 @@ def proofread_hebrew(message: str) -> str:
         "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
         "• הטיות שגויות של פעלים ושמות\n"
         "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
+        "• שגיאות כתיב והקלדה (למשל 'וטופס' במקום 'ומטפס')\n"
         "• מבנה משפט מסורבל\n"
         "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
         "• 'דו-עינית' → 'משקפת'\n"
@@ -1607,7 +1628,7 @@ def proofread_hebrew(message: str) -> str:
         f"ההודעה:\n{message}"
     )
     try:
-        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="low",
+        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="medium",
                                            max_tokens=4000, timeout=180))
         if not result:
             print("⚠️ הגהה החזירה תשובה ריקה – שולח הודעה מקורית")
@@ -1874,6 +1895,7 @@ def generate_message(payload: dict) -> str:
 {(f'''🌙 כוכבי לכת שעולים במהלך הלילה / לפנות בוקר – נראות אמיתית במזרח (גובה מחושב לתחילת דמדומי הבוקר, ~{astro.get('dawn_start','N/A')}):
 {chr(10).join(astro['planets_night'])}
    ⓘ אלה כוכבים שעולים במזרח *אחרי* שהערב מתקדם – חלקם כבר בשעת לילה נוחה (ראה "עולה במזרח ב-..."), אחרים ממש לפנות בוקר. אם יש כאן כוכב בולט (מאדים/צדק/שבתאי, או נוגה כ"כוכב השחר") שלב משפט קצר: הכיוון (מזרח), שעת הזריחה שלו, והגובה לפנות בוקר. אל תפרט על כל כוכב – בחר את הבולט/ים. הפרד בבירור בין תצפית הלילה/בוקר הזו לתצפית הערב.''') if astro.get('planets_night') else ''}
+   ⚠️ השעה עכשיו {current_time}: כוכב לכת ששעת השקיעה שלו כבר עברה – אל תזכיר אותו כלל (גם לא "שקע מוקדם"). כתוב רק על מה שעוד אפשר לראות מעכשיו והלאה.
    ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימות למעלה (ערב, לילה או בוקר). כוכב שאינו מופיע באף רשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
    ⓘ כשכוכב מסומן כ"עמום" (כמו אורנוס/נפטון) – *אל תשמיט* את ההערה שדרושים משקפת/טלסקופ ושמיים חשוכים. אל תתאר כוכב עמום כ"בולט" או "זוהר" – הוא יעד לצופים מנוסים בלבד.
 
@@ -1897,7 +1919,8 @@ def generate_message(payload: dict) -> str:
    ⓘ חובה: אם בנתונים יש סעיף "ביום זה בהיסטוריה" – שלב **משפט אחד** (לא יותר) על האירוע ההיסטורי בתוך פסקת החדשות. זו פינה קבועה של הבוט – אל תדלג עליה.
 
 ⚠️ חשוב: אל תסיים ב"שאו מרום עיניכם..." – שורת החתימה מתווספת אוטומטית.
-⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית."""
+⚠️ חשוב: אל תכתוב על קידוש לבנה או אירועים קרובים – זה מתווסף אוטומטית.
+⚠️ אורך: עד 150 מילה בגוף ההודעה. בחר את הפריטים המעניינים – לא חייבים להכניס את כל הנתונים."""
 
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
@@ -2608,6 +2631,7 @@ def main():
 
     print("✳️ מנרמל הדגשות בולד לוואטסאפ...")
     message = fix_whatsapp_bold(message)
+    message = fix_negative_magnitude(message)
 
     print("\n" + "═"*50)
     print(message)

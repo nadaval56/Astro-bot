@@ -1128,7 +1128,34 @@ def get_astronomical_data() -> dict:
         except Exception:
             pass
 
+        # ── ניגוד של כוכב לכת חיצוני (רק אם בתוך ±3 ימים) ──
+        # הניגוד הגיע עד כה רק מחיפוש החדשות, והמודל כתב פעם "היום", פעם
+        # "אתמול" ופעם השמיט. כאן הוא מחושב: היום שבו המרחק הזוויתי מהשמש
+        # מרבי (בגלל נטיית המסלול השיא הוא ~177° ולא 180° בדיוק).
+        opposition_events = []
+        try:
+            for p_name, p_cls in (("מאדים", ephem.Mars), ("צדק", ephem.Jupiter),
+                                  ("שבתאי", ephem.Saturn), ("אורנוס", ephem.Uranus),
+                                  ("נפטון", ephem.Neptune)):
+                days = range(-4, 5)
+                elongs = [abs(math.degrees(float(p_cls(ephem.Date(evening_utc) + d).elong)))
+                          for d in days]
+                i = max(range(len(elongs)), key=elongs.__getitem__)
+                if 0 < i < len(elongs) - 1 and elongs[i] > 170:
+                    d = days[i]
+                    when = ("היום"  if d ==  0 else
+                            "מחר"   if d ==  1 else
+                            "אתמול" if d == -1 else
+                            f"בעוד {d} ימים" if d > 0 else
+                            f"לפני {abs(d)} ימים")
+                    opposition_events.append(
+                        f"{p_name} בניגוד (מול השמש) – {when}: נראה כל הלילה, "
+                        f"עולה בשקיעה ושוקע בזריחה, בבהירות השנתית המרבית")
+        except Exception:
+            pass
+
         return {
+            "opposition_events":    opposition_events,
             "moon_pct":             pct,
             "moon_phase":           phase_name,
             "moon_age":             round(age, 1),
@@ -1887,6 +1914,7 @@ def generate_message(payload: dict) -> str:
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
 🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
+{chr(10).join("🪐 " + e + " – מחושב, זה התאריך הנכון גם אם בחדשות כתוב אחרת." for e in astro.get('opposition_events', []))}
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
 🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):

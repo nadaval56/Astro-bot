@@ -69,9 +69,16 @@ jobs:
       - name: 📦 התקנת ספריות
         run: pip install -r requirements.txt
 
+      # Claude Code CLI – הקריאות ל-Claude רצות דרכו על מנוי ה-Max
+      # (CLAUDE_CODE_OAUTH_TOKEN, מופק ב-`claude setup-token`).
+      # ANTHROPIC_API_KEY נשאר כגיבוי בלבד, אם ה-CLI נכשל.
+      - name: 🤖 התקנת Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: 🔭 הרצת בוט האסטרונומיה
         env:
-          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}   # גיבוי
           GREEN_API_INSTANCE:  ${{ secrets.GREEN_API_INSTANCE }}
           GREEN_API_TOKEN:     ${{ secrets.GREEN_API_TOKEN }}
           WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}

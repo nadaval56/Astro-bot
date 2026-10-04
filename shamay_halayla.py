@@ -20,7 +20,7 @@
     המחובר לשבת (ראש השנה), שבו היציאה היא רק יומיים אחרי הכניסה.
 """
 
-import os, re, sys, json, math, time
+import os, re, sys, json, math, time, shutil, subprocess, tempfile
 from datetime import datetime, timedelta, date
 from pathlib import Path
 import requests
@@ -48,6 +48,21 @@ CLOUD_POOR        = 80   # מעורפל – כבד, אך ייתכן פתח
 CLAUDE_MODEL         = "claude-sonnet-5"   # gather, proofread, summary
 CLAUDE_MODEL_WRITER  = "claude-opus-5"     # generate_message – כתיבה בלבד
 CLAUDE_API   = "https://api.anthropic.com/v1/messages"
+
+# ── מסלול הקריאה ל-Claude ──────────────────
+# ראשי: Claude Code CLI (`claude -p`) עם CLAUDE_CODE_OAUTH_TOKEN – רץ על מנוי
+#       ה-Max, בלי חיוב API. הטוקן מופק פעם אחת ב-`claude setup-token`.
+# גיבוי: Messages API ישיר עם ANTHROPIC_API_KEY – רק אם ה-CLI נכשל
+#       (מכסת המנוי נגמרה, טוקן פג, CLI לא מותקן).
+# CLAUDE_BACKEND: auto (ברירת מחדל) / cli (בלי גיבוי) / api (בלי CLI).
+CLAUDE_BACKEND = os.environ.get("CLAUDE_BACKEND", "auto").lower()
+
+# מחליף את הנחיית המערכת של Claude Code (שבנויה לעבודה על קוד). ב-API לא
+# הייתה הנחיית מערכת כלל – כל ההנחיות יושבות בגוף הבקשה – ולכן כאן היא מינימלית.
+CLI_SYSTEM_PROMPT = (
+    "You are a careful assistant working for a Hebrew astronomy WhatsApp bot. "
+    "Follow the user's instructions exactly and reply with the requested output only."
+)
 
 # ── חלון שליחה מותר (שעון ישראל) ──────────
 # ריצה שנופלת מחוץ לחלון (22:30 בלילה עד 09:00 בבוקר) מתבטלת אוטומטית.
@@ -79,7 +94,7 @@ VALID_OPENINGS = [
 ]
 
 # ── משתני סביבה ──────────────────────────
-ANTHROPIC_API_KEY      = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")   # גיבוי בלבד
 GREEN_API_INSTANCE     = os.environ["GREEN_API_INSTANCE"]
 GREEN_API_TOKEN        = os.environ["GREEN_API_TOKEN"]
 WHATSAPP_GROUP_ID      = os.environ["WHATSAPP_GROUP_ID"]
@@ -598,35 +613,131 @@ def claude_text(resp: dict) -> str:
     ).strip()
 
 
-def extract_summary_from_message(message: str, payload: dict) -> dict:
+def cli_enabled() -> bool:
+    return CLAUDE_BACKEND != "api" and shutil.which("claude") is not None
+
+
+def api_enabled() -> bool:
+    return CLAUDE_BACKEND != "cli" and bool(ANTHROPIC_API_KEY)
+
+
+def content_to_text(content) -> str:
+    """גוף הודעה בפורמט ה-API (מחרוזת או רשימת בלוקים) → מחרוזת אחת ל-CLI."""
+    if isinstance(content, str):
+        return content
+    return "\n\n".join(b["text"] for b in content if b.get("type") == "text")
+
+
+def claude_cli(prompt: str, *, model: str, effort: str, timeout: int,
+               web_search: bool = False, attempts: int = 1) -> str:
+    """קריאה ל-Claude דרך Claude Code CLI (על מנוי ה-Max).
+
+    מחזיר את הטקסט, או "" בכל כישלון – והקורא נופל ל-API.
+    כלים: בלי כלים בכלל, או WebSearch בלבד – כדי שהסוכן לא יקרא קבצים
+    ולא יריץ פקודות, ויתנהג כמו בקשת API בודדת.
+    """
+    cmd = [
+        "claude", "-p",
+        "--model", model,
+        "--effort", effort,
+        "--output-format", "json",
+        "--system-prompt", CLI_SYSTEM_PROMPT,
+        "--tools", "WebSearch" if web_search else "",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+    ]
+    if web_search:
+        cmd += ["--allowedTools", "WebSearch"]
+    # ANTHROPIC_API_KEY בסביבה גובר על טוקן המנוי – ואז ה-CLI היה מחייב את
+    # ה-API בשקט. לכן הוא מוסר מהסביבה של התהליך.
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(30)
+        try:
+            p = subprocess.run(
+                cmd, input=prompt, capture_output=True, text=True,
+                timeout=timeout, env=env, cwd=tempfile.gettempdir(),
+            )
+        except subprocess.TimeoutExpired:
+            print(f"⚠️ Claude Code: timeout אחרי {timeout} שניות")
+            continue
+        except OSError as e:
+            print(f"⚠️ Claude Code לא הופעל: {e}")
+            return ""
+        try:
+            data = json.loads(p.stdout)
+        except ValueError:
+            print(f"⚠️ Claude Code: פלט לא תקין (exit {p.returncode}): "
+                  f"{(p.stderr or p.stdout)[:300]}")
+            continue
+        if data.get("is_error") or data.get("subtype") != "success":
+            print(f"⚠️ Claude Code נכשל: {data.get('subtype')} – "
+                  f"{str(data.get('result'))[:300]}")
+            continue
+        if data.get("stop_reason") == "refusal":
+            print("⚠️ Claude סירב לבקשה (Claude Code)")
+            return ""
+        text = (data.get("result") or "").strip()
+        print(f"🖥️ Claude Code ({model}, effort={effort}): "
+              f"{data.get('num_turns')} סבבים, "
+              f"{data.get('duration_ms', 0) / 1000:.0f} שניות")
+        if text:
+            return text
+    return ""
+
+
+def ask_claude(content, *, model: str, effort: str, max_tokens: int,
+               timeout: int) -> str:
+    """בקשה פשוטה (בלי כלים): CLI על המנוי, ובכישלון – API כגיבוי.
+    זורק חריגה אם אף מסלול לא הצליח; הקוראים כבר מטפלים בזה."""
+    if cli_enabled():
+        text = claude_cli(content_to_text(content), model=model,
+                          effort=effort, timeout=timeout)
+        if text:
+            return text
+        print("↩️ Claude Code נכשל – עובר ל-API")
+    if not api_enabled():
+        raise RuntimeError("אין מסלול זמין ל-Claude (CLI נכשל ואין ANTHROPIC_API_KEY)")
     headers = {
         "x-api-key":         ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
     }
     body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    2000,
+        "model":         model,
+        "max_tokens":    max_tokens,
         "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "low"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                "Summarize this astronomy WhatsApp message in a JSON object.\n"
-                "Rules: English keys only, short Hebrew values (max 10 words each).\n"
-                "Use these keys: weather, moon, planets, iss, space_news, jewish\n"
-                "IMPORTANT: this_day_history key = ONLY for 'X years ago today' anniversary events.\n"
-                "Current news/discoveries go in space_news, NOT in this_day_history.\n"
-                "Return ONLY the JSON object, no markdown, no explanation.\n\n"
-                f"Message:\n{message[:1500]}"
-            )
-        }]
+        "output_config": {"effort": effort},
+        "messages":      [{"role": "user", "content": content}],
     }
+    r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=timeout)
+    r.raise_for_status()
+    return claude_text(r.json())
+
+
+def strip_sources(text: str) -> str:
+    """כלי ה-WebSearch של Claude Code מצרף רשימת "Sources:" בסוף. ב-API היא
+    לא הייתה, ואין צורך להעביר קישורים לכותב – לכן היא נחתכת."""
+    m = re.search(r'\n\s*\**(Sources|מקורות)\**:?\**\s*\n', text)
+    return text[:m.start()].strip() if m else text
+
+
+def extract_summary_from_message(message: str, payload: dict) -> dict:
+    content = (
+        "Summarize this astronomy WhatsApp message in a JSON object.\n"
+        "Rules: English keys only, short Hebrew values (max 10 words each).\n"
+        "Use these keys: weather, moon, planets, iss, space_news, jewish\n"
+        "IMPORTANT: this_day_history key = ONLY for 'X years ago today' anniversary events.\n"
+        "Current news/discoveries go in space_news, NOT in this_day_history.\n"
+        "Return ONLY the JSON object, no markdown, no explanation.\n\n"
+        f"Message:\n{message[:1500]}"
+    )
     raw = ""
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=90)
-        r.raise_for_status()
-        raw = claude_text(r.json())
+        raw = ask_claude(content, model=CLAUDE_MODEL, effort="low",
+                         max_tokens=2000, timeout=120)
         raw = raw.replace("```json", "").replace("```", "").strip()
         start = raw.find('{')
         end   = raw.rfind('}')
@@ -1443,36 +1554,21 @@ def quality_check(message: str, payload: dict) -> str:
         else ""
     )
 
-    headers = {
-        "x-api-key":         ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-    }
-    body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    4000,
-        "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "medium"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                f"אתה בודק עובדתי של הודעה. שתי משימות בלבד:\n\n"
-                f"1. 'הלילה': שקיעה היום ב-{sunset}. "
-                f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
-                f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
-                f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
-                f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
-                f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
-                f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
-                f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
-                f"ההודעה:\n{message}"
-            )
-        }]
-    }
+    content = (
+        f"אתה בודק עובדתי של הודעה. שתי משימות בלבד:\n\n"
+        f"1. 'הלילה': שקיעה היום ב-{sunset}. "
+        f"אם כתוב 'הלילה X' על אירוע שכבר התרחש לפני השקיעה – "
+        f"שנה ל'היום X' או מחק לפי הקשר. אחרת – אל תגע.\n"
+        f"2. חזרה: רק אם חדשה **ממש אותו אירוע** (לא רק נושא דומה) מופיעה בהיסטוריה – "
+        f"הסר את המשפט הספציפי. אירועים היסטוריים ('לפני X שנים') לעולם אינם חזרה.{history_section}\n\n"
+        f"חשוב מאוד: אל תשנה ניסוח, אל תקצר, אל תוסיף. "
+        f"אם לא מצאת בעיה – החזר את ההודעה כפי שהיא, מילה במילה.\n"
+        f"החזר אך ורק את ההודעה הסופית – בלי ניתוח, בלי הסבר, בלי טקסט לפני או אחרי.\n\n"
+        f"ההודעה:\n{message}"
+    )
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
-        r.raise_for_status()
-        result = strip_preamble(claude_text(r.json()))
+        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="medium",
+                                           max_tokens=4000, timeout=180))
         if result and len(result) >= len(message) * 0.85:
             print("✅ quality_check: הושלם")
             return result
@@ -1484,50 +1580,35 @@ def quality_check(message: str, payload: dict) -> str:
 
 
 def proofread_hebrew(message: str) -> str:
-    headers = {
-        "x-api-key":         ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type":      "application/json",
-    }
-    body = {
-        "model":         CLAUDE_MODEL,
-        "max_tokens":    4000,
-        "thinking":      {"type": "adaptive"},
-        "output_config": {"effort": "low"},
-        "messages": [{
-            "role": "user",
-            "content": (
-                "אתה מגיה עברית מקצועי. תפקידך לתקן שגיאות לשון בלבד.\n"
-                "חובה לשמור על:\n"
-                "• כל התוכן, המידע והעובדות – ללא שינוי\n"
-                "• כל האימוג'י\n"
-                "• כל עיצוב הטקסט (*בולד*, שורות ריקות)\n"
-                "• אורך ההודעה – אל תקצר ואל תוסיף\n\n"
-                "תקן רק:\n"
-                "• זכר/נקבה שגוי\n"
-                "• 'לילה' הוא שם עצם ממין זכר: 'לילה חשוך' ולא 'לילה חשוכה', "
-                "'הלילה בהיר' ולא 'הלילה בהירה', 'לילות חשוכים' ולא 'לילות חשוכות'. "
-                "'שמיים' זכר רבים: 'שמיים בהירים' ולא 'שמיים בהירות'\n"
-                "• 'תחילת הלילה חשוכה' – מבנה צורם, נסח מחדש ואל תתקן ל'חשוך': "
-                "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
-                "• הטיות שגויות של פעלים ושמות\n"
-                "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
-                "• מבנה משפט מסורבל\n"
-                "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
-                "• 'דו-עינית' → 'משקפת'\n"
-                "• 'בראייה ערומה' / 'בעין רגילה' → 'בעין בלתי מזוינת'\n"
-                "• מיילים → המר לקילומטרים (1 מייל = 1.609 ק\"מ)\n"
-                "• 'קרייטר' / 'קרטר' → 'מכתש'\n"
-                "• ו/ה/ב/כ/ל/מ/ש לפני *בולד* – כנס לפנים: *ונוגה* לא ו*נוגה*\n\n"
-                "החזר את ההודעה המתוקנת בלבד, ללא הסברים.\n\n"
-                f"ההודעה:\n{message}"
-            )
-        }]
-    }
+    content = (
+        "אתה מגיה עברית מקצועי. תפקידך לתקן שגיאות לשון בלבד.\n"
+        "חובה לשמור על:\n"
+        "• כל התוכן, המידע והעובדות – ללא שינוי\n"
+        "• כל האימוג'י\n"
+        "• כל עיצוב הטקסט (*בולד*, שורות ריקות)\n"
+        "• אורך ההודעה – אל תקצר ואל תוסיף\n\n"
+        "תקן רק:\n"
+        "• זכר/נקבה שגוי\n"
+        "• 'לילה' הוא שם עצם ממין זכר: 'לילה חשוך' ולא 'לילה חשוכה', "
+        "'הלילה בהיר' ולא 'הלילה בהירה', 'לילות חשוכים' ולא 'לילות חשוכות'. "
+        "'שמיים' זכר רבים: 'שמיים בהירים' ולא 'שמיים בהירות'\n"
+        "• 'תחילת הלילה חשוכה' – מבנה צורם, נסח מחדש ואל תתקן ל'חשוך': "
+        "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
+        "• הטיות שגויות של פעלים ושמות\n"
+        "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
+        "• מבנה משפט מסורבל\n"
+        "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
+        "• 'דו-עינית' → 'משקפת'\n"
+        "• 'בראייה ערומה' / 'בעין רגילה' → 'בעין בלתי מזוינת'\n"
+        "• מיילים → המר לקילומטרים (1 מייל = 1.609 ק\"מ)\n"
+        "• 'קרייטר' / 'קרטר' → 'מכתש'\n"
+        "• ו/ה/ב/כ/ל/מ/ש לפני *בולד* – כנס לפנים: *ונוגה* לא ו*נוגה*\n\n"
+        "החזר את ההודעה המתוקנת בלבד, ללא הסברים.\n\n"
+        f"ההודעה:\n{message}"
+    )
     try:
-        r = requests.post(CLAUDE_API, headers=headers, json=body, timeout=120)
-        r.raise_for_status()
-        result = strip_preamble(claude_text(r.json()))
+        result = strip_preamble(ask_claude(content, model=CLAUDE_MODEL, effort="low",
+                                           max_tokens=4000, timeout=180))
         if not result:
             print("⚠️ הגהה החזירה תשובה ריקה – שולח הודעה מקורית")
             return message
@@ -1603,6 +1684,17 @@ def gather_space_news(date_str: str, jewish_context: str = "", recent_news: list
 
 ללא עיצוב, ללא סגנון, ללא המלצות. רק עובדות."""}]
     }
+
+    # ראשי: Claude Code עם WebSearch בלבד. הסוכן מנהל את סבבי החיפוש בעצמו,
+    # ולכן אין כאן טיפול ב-pause_turn; ה-timeout גבוה מבקשת API בודדת.
+    if cli_enabled():
+        text = claude_cli(body["messages"][0]["content"], model=CLAUDE_MODEL,
+                          effort="medium", timeout=480, web_search=True)
+        if text:
+            return strip_sources(text)
+        print("↩️ Claude Code נכשל באיסוף חדשות – עובר ל-API")
+    if not api_enabled():
+        return "אין חדשות חלל זמינות"
 
     time.sleep(3)
     messages = [body["messages"][0].copy()]
@@ -1835,6 +1927,18 @@ def generate_message(payload: dict) -> str:
         "output_config": {"effort": "high"},
         "messages":      [initial_message],
     }
+
+    # ראשי: Claude Code בלי כלים. כאן אין fallback להודעה – כישלון מפיל את
+    # הריצה – ולכן שני ניסיונות לפני מעבר ל-API.
+    if cli_enabled():
+        text = claude_cli(content_to_text(initial_message["content"]),
+                          model=CLAUDE_MODEL_WRITER, effort="high",
+                          timeout=420, attempts=2)
+        if text:
+            return strip_preamble(text)
+        print("↩️ Claude Code נכשל בכתיבת ההודעה – עובר ל-API")
+    if not api_enabled():
+        raise RuntimeError("כתיבת ההודעה נכשלה: Claude Code נכשל ואין ANTHROPIC_API_KEY לגיבוי")
 
     messages = [initial_message]
 

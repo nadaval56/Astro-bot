@@ -256,6 +256,46 @@ def get_cloud_cover() -> int | None:
         return None
 
 
+HEBREW_WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+
+
+def get_cloud_outlook(days: int = 3) -> list[str]:
+    """עננות ממוצעת ב-20:00–23:00 לערבים הבאים – לערב מעונן, כדי שההודעה
+    תוכל לומר מתי צפוי להתבהר (rules.md: "ספר מה מחכה בימים הקרובים")."""
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly=cloudcover"
+        f"&timezone=Asia%2FJerusalem"
+        f"&forecast_days={days + 1}"
+    )
+    try:
+        for attempt in range(2):
+            try:
+                r = requests.get(url, timeout=15)
+                r.raise_for_status()
+                break
+            except requests.exceptions.RequestException:
+                if attempt:
+                    raise
+                time.sleep(3)
+        data = r.json()
+        by_day = {}
+        for t, c in zip(data["hourly"]["time"], data["hourly"]["cloudcover"]):
+            day, hour = t.split("T")
+            if 20 <= int(hour[:2]) <= 23 and c is not None:
+                by_day.setdefault(day, []).append(c)
+        out = []
+        for day in sorted(by_day)[1:days + 1]:   # בלי הערב הנוכחי
+            d = datetime.strptime(day, "%Y-%m-%d")
+            pct = round(sum(by_day[day]) / len(by_day[day]))
+            out.append(f"יום {HEBREW_WEEKDAYS[d.weekday()]} ({d.day}.{d.month}): {pct}%")
+        return out
+    except Exception as e:
+        print(f"⚠️ לא הצלחתי למשוך תחזית עננות לימים הבאים: {e}")
+        return []
+
+
 def cloud_label(pct: int) -> tuple[str, str]:
     if pct < CLOUD_CLEAR:
         return "clear",         f"שמיים בהירים ({pct}%) – לילה מושלם לצפייה! 🌟"
@@ -538,7 +578,10 @@ def get_station_passes() -> list[str]:
 HISTORY_FILE = Path("message_history.json")
 HISTORY_DAYS = 7
 
-DIRECTION_NAMES = ["צפון","צ-מ","מזרח","ד-מ","דרום","ד-מ","מערב","צ-מ"]
+# שמות מלאים: הקיצור הקודם ("ד-מ"/"צ-מ") שימש גם לדרום-מזרח וגם לדרום-מערב,
+# והמודל ניחש את הכיוון.
+DIRECTION_NAMES = ["צפון", "צפון-מזרח", "מזרח", "דרום-מזרח",
+                   "דרום", "דרום-מערב", "מערב", "צפון-מערב"]
 
 
 # ══════════════════════════════════════════
@@ -947,13 +990,35 @@ def get_astronomical_data() -> dict:
             o.date = dt_utc
             return o
 
-        obs_dark   = _obs_at(dark_utc)   if dark_utc   else _obs_at(evening_utc)
+        # ריצה שמתחילה אחרי שכבר החשיך (בחורף ההחשכה ~17:20 והריצה ב-19:30)
+        # – הגבהים מחושבים לשעת הריצה, אחרת ההודעה מפנה לשעה שכבר עברה.
+        run_now     = datetime.now(ISRAEL_TZ)
+        already_dark = bool(dark_dt and run_now > dark_dt)
+        if already_dark:
+            obs_dark  = _obs_at(run_now.astimezone(pytz.utc).replace(tzinfo=None))
+            ref_label = run_now.strftime("%H:%M")
+            ref_when  = "גובה עכשיו, כשכבר חשוך"
+        else:
+            obs_dark  = _obs_at(dark_utc) if dark_utc else _obs_at(evening_utc)
+            ref_label = dark_start if dark_dt else "19:30"
+            ref_when  = "נראה משהשמיים מתכהים"
         obs_sunset = _obs_at(sunset_utc) if sunset_dt  else obs_dark
-        ref_label  = dark_start if dark_dt else "19:30"
+
+        def _culmination(cls):
+            """שעת השיא (מעבר מרידיאן) הקרובה והגובה בה – לכוכב שעדיין עולה."""
+            try:
+                o  = _obs_at(obs_dark.date)
+                tr = o.next_transit(cls(o))
+                o.date = tr
+                alt = round(math.degrees(float(cls(o).alt)))
+                t = (tr.datetime().replace(tzinfo=pytz.utc)
+                     .astimezone(ISRAEL_TZ).strftime("%H:%M"))
+                return t, alt
+            except Exception:
+                return None, None
 
         planets_visible = []
         evening_planet_names = set()  # למניעת דיווח כפול ברשימת הלילה/בוקר
-        run_now = datetime.now(ISRAEL_TZ)
         for name, cls in planet_defs:
             b_dark    = cls(obs_dark)
             alt_dark  = math.degrees(float(b_dark.alt))
@@ -993,7 +1058,11 @@ def get_astronomical_data() -> dict:
 
             if alt_dark > 10:
                 desc = (f"{name} – גובה {round(alt_dark)}° ב{direction}, בהירות {mag}{mag_hint} "
-                        f"(נראה משהשמיים מתכהים, ~{ref_label})")
+                        f"({ref_when}, ~{ref_label})")
+                if az < 180:
+                    c_t, c_alt = _culmination(cls)
+                    if c_t:
+                        desc += f"; עולה ומגיע לשיא ~{c_alt}° בדרום ב-{c_t}"
                 if set_str:
                     desc += f"; שוקע ב-{set_str}"
                     if mins_after_dark is not None and mins_after_dark <= 60:
@@ -1004,9 +1073,11 @@ def get_astronomical_data() -> dict:
             elif alt_dark > 0 and az < 180:
                 # נמוך אבל *במזרח* – הכוכב עולה ומטפס במהלך הלילה (למשל
                 # כוכב בניגוד). "חלון קצר" נכון רק לכוכב ששוקע במערב.
-                desc = (f"{name} – נמוך ({round(alt_dark)}°) ב{direction} כשהשמיים מתכהים "
-                        f"(~{ref_label}), בהירות {mag}{mag_hint}; עולה ומטפס במהלך הלילה – "
-                        f"נוח יותר לצפייה בהמשך הערב")
+                c_t, c_alt = _culmination(cls)
+                desc = (f"{name} – נמוך ({round(alt_dark)}°) ב{direction} (~{ref_label}), "
+                        f"בהירות {mag}{mag_hint}; עולה ומטפס – "
+                        + (f"מגיע לשיא ~{c_alt}° בדרום ב-{c_t}, ואחר כך יורד מערבה"
+                           if c_t else "נוח יותר לצפייה בהמשך הערב"))
                 if set_str:
                     desc += f"; שוקע רק ב-{set_str}"
                 planets_visible.append(desc)
@@ -1173,6 +1244,8 @@ def get_astronomical_data() -> dict:
             "sunset":               sunset,
             "sunrise":              sunrise,
             "dark_start":           dark_start,
+            "already_dark":         already_dark,
+            "planets_ref_time":     ref_label,
             "dawn_start":           dawn_start,
         }
 
@@ -1642,7 +1715,9 @@ def proofread_hebrew(message: str) -> str:
         "• 'תחילת הלילה חשוכה' – מבנה צורם, נסח מחדש ואל תתקן ל'חשוך': "
         "'בתחילת הלילה השמיים חשוכים' / 'בתחילת הלילה ישרור חושך'\n"
         "• הטיות שגויות של פעלים ושמות\n"
-        "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"
+        "• ביטויים לא עבריים שאפשר לנסח בעברית טבעית\n"        "• שם לועזי של משימה/טלסקופ/גוף שמי שיש לו תעתיק עברי – בעברית: "
+        "'Chang'e-6' → 'צ'אנג'ה 6', 'Roman' → 'רומן' (בלי התוספת הלועזית בסוגריים). "
+        "כינוי קטלוגי בלבד (IC 348, C/2025 A6) נשאר\n"
         "• שגיאות כתיב והקלדה (למשל 'וטופס' במקום 'ומטפס')\n"
         "• מבנה משפט מסורבל\n"
         "• 'מקלחת מטאורים' → 'מטר מטאורים'\n"
@@ -1812,6 +1887,9 @@ def generate_message(payload: dict) -> str:
         cloud_block = "🌤 עננות: אין נתון זמין – אל תתייחס לעננות או למצב השמיים בהודעה."
     else:
         cloud_block = f"🌤 עננות: {cloud_pct}%\n   הערכה: {cloud_desc}"
+        if payload.get("cloud_outlook"):
+            cloud_block += ("\n   תחזית עננות לערבים הבאים: " + " | ".join(payload["cloud_outlook"])
+                            + "\n   ⓘ ערב מעונן – אל תדכא: ציין בקצרה מתי צפוי להתבהר לפי התחזית.")
     astro        = payload["astro"]
     iss          = payload["iss"]
     j_events     = payload["jewish_events"]
@@ -1913,11 +1991,11 @@ def generate_message(payload: dict) -> str:
 
 🌅 שקיעת שמש: {astro.get('sunset','N/A')}
 🌄 זריחת שמש מחר: {astro.get('sunrise','N/A')}
-🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה).
+{f"🌌 כבר חשוך – השמיים התכהו ב-{astro.get('dark_start','N/A')}, לפני שעת ההודעה. אל תפנה את הקוראים לשעת ההחשכה; כתוב על מה שנראה מעכשיו." if astro.get('already_dark') else f"🌌 השמיים מתכהים מספיק לתצפית כוכבי לכת בערך ב-{astro.get('dark_start','N/A')} (סוף דמדומים אזרחיים, ~30 דק' אחרי השקיעה)."}
 {chr(10).join("🪐 " + e + " – מחושב, זה התאריך הנכון גם אם בחדשות כתוב אחרת." for e in astro.get('opposition_events', []))}
 {f"🌞 אירוע עונתי: {astro['seasonal_event']} – חובה לשלב משפט אחד קצר על כך (היום הארוך/הקצר בשנה / יום ולילה שווים)." if astro.get('seasonal_event') else ''}
 
-🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב לרגע שהשמיים מתכהים, ~{astro.get('dark_start','N/A')}, ולא לשקיעה):
+🪐 כוכבי לכת בערב – נראות אמיתית (גובה מחושב ל-~{astro.get('planets_ref_time', astro.get('dark_start','N/A'))}{" – שעת ההודעה" if astro.get('already_dark') else ", הרגע שהשמיים מתכהים, ולא לשקיעה"}):
 {chr(10).join(astro['planets_visible']) or "אין כוכבי לכת בולטים מעל האופק בערב כשהשמיים מתכהים"}
    ⓘ אל תמליץ לצפות בכוכב לכת "מיד אחרי השקיעה" אם הוא נמוך מאוד או שוקע סמוך לזמן ההחשכה – ציין שצריך לחכות שהשמיים יתכהו (~{astro.get('dark_start','N/A')}), ואם הוא שוקע לפני כן אמור זאת במפורש ואל תמליץ עליו. נוגה בהירה ונראית מוקדם; כוכבי הלכת החיצוניים זקוקים לשמיים כהים יותר.
 {(f'''🌙 כוכבי לכת שעולים במהלך הלילה / לפנות בוקר – נראות אמיתית במזרח (גובה מחושב לתחילת דמדומי הבוקר, ~{astro.get('dawn_start','N/A')}):
@@ -1927,9 +2005,10 @@ def generate_message(payload: dict) -> str:
    ⚠️ התייחס אך ורק לכוכבי הלכת שמופיעים ברשימות למעלה (ערב, לילה או בוקר). כוכב שאינו מופיע באף רשימה נמצא כעת קרוב לשמש (בהצמדה) ואינו נראה כלל – אל תזכיר אותו בשום צורה, גם לא כדי לומר שאי אפשר לראותו.
    ⓘ כשכוכב מסומן כ"עמום" (כמו אורנוס/נפטון) – *אל תשמיט* את ההערה שדרושים משקפת/טלסקופ ושמיים חשוכים. אל תתאר כוכב עמום כ"בולט" או "זוהר" – הוא יעד לצופים מנוסים בלבד.
 
-🌌 קבוצות כוכבים בולטות בערב (לפי עונה):
+🌌 קבוצות כוכבים בולטות בערב (לפי עונה) – המיקומים נכונים ל-~21:00 בלבד:
 {constellations_block}
    ⓘ אם הלילה חשוך (עננות נמוכה + אין ירח מציק) – שלב משפט קצר על קבוצות הכוכבים: ציין כיוון אחד-שניים בולטים. אל תפרט יותר מדי, רק מסגרת לתצפית.
+   ⚠️ אל תצמיד את המיקומים האלה לשעה אחרת – לא "אחרי שהירח ישקע", לא "לפנות בוקר". בשעות מאוחרות הכיוונים כבר אחרים.
 
 🛸 מעברי תחנות חלל (פתחים תמיד עם הטקסט העברי, לא עם "ISS" באנגלית):
 {chr(10).join(iss) if iss else "אין מעברים הלילה"}
@@ -2568,10 +2647,13 @@ def main():
 
     print("📡 מושך נתוני עננות...")
     cloud_pct            = get_cloud_cover()
+    cloud_outlook        = []
     if cloud_pct is None:
         cloud_status, cloud_desc = "unknown", None
     else:
         cloud_status, cloud_desc = cloud_label(cloud_pct)
+        if cloud_pct >= CLOUD_POOR:
+            cloud_outlook = get_cloud_outlook()
 
     print("🔭 מחשב נתוני ירח וכוכבים (ל-19:30 ישראל)...")
     astro = get_astronomical_data()
@@ -2621,6 +2703,7 @@ def main():
         "cloud_pct":     cloud_pct,
         "cloud_status":  cloud_status,
         "cloud_desc":    cloud_desc,
+        "cloud_outlook": cloud_outlook,
         "astro":         astro,
         "iss":           iss,
         "jewish_events": j_events,

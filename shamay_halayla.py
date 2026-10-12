@@ -101,8 +101,9 @@ WHATSAPP_GROUP_ID      = os.environ["WHATSAPP_GROUP_ID"]
 # כתובת השרת של Green API. ב-11.10.2026 הכתובת הישנה api.green-api.com הפסיקה
 # לענות (connect timeout) בזמן ש-api.greenapi.com – ה"host האוניברסלי" לפי
 # התיעוד שלהם – ענה. אפשר להגדיר את ה-apiUrl הייעודי של האינסטנס מהקונסול
-# (למשל https://7103.api.greenapi.com) ב-secret ‏GREEN_API_URL.
-GREEN_API_URL          = (os.environ.get("GREEN_API_URL") or "https://api.greenapi.com").rstrip("/")
+# ב-secret ‏GREEN_API_URL. ברירת המחדל היא ה-apiUrl הייעודי של האינסטנס שלנו מהקונסול
+# (12.10.2026) – ה-host האוניברסלי התחבר אבל לא ענה (read timeout).
+GREEN_API_URL          = (os.environ.get("GREEN_API_URL") or "https://7107.api.greenapi.com").rstrip("/")
 
 
 # ══════════════════════════════════════════

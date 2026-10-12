@@ -98,6 +98,11 @@ ANTHROPIC_API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")   # גיבוי 
 GREEN_API_INSTANCE     = os.environ["GREEN_API_INSTANCE"]
 GREEN_API_TOKEN        = os.environ["GREEN_API_TOKEN"]
 WHATSAPP_GROUP_ID      = os.environ["WHATSAPP_GROUP_ID"]
+# כתובת השרת של Green API. ב-11.10.2026 הכתובת הישנה api.green-api.com הפסיקה
+# לענות (connect timeout) בזמן ש-api.greenapi.com – ה"host האוניברסלי" לפי
+# התיעוד שלהם – ענה. אפשר להגדיר את ה-apiUrl הייעודי של האינסטנס מהקונסול
+# (למשל https://7103.api.greenapi.com) ב-secret ‏GREEN_API_URL.
+GREEN_API_URL          = (os.environ.get("GREEN_API_URL") or "https://api.greenapi.com").rstrip("/")
 
 
 # ══════════════════════════════════════════
@@ -2149,7 +2154,7 @@ def get_instance_state() -> str:
     24ש'). לכן צריך לבדוק את ה-state במפורש לפני שמכריזים על שליחה.
     """
     url = (
-        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"{GREEN_API_URL}/waInstance{GREEN_API_INSTANCE}"
         f"/getStateInstance/{GREEN_API_TOKEN}"
     )
     r = requests.get(url, timeout=15)
@@ -2165,7 +2170,7 @@ def message_still_queued(id_message: str) -> bool:
     בדיקה זו מבדילה בין "נכנס לתור" ל"נשלח בפועל".
     """
     url = (
-        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"{GREEN_API_URL}/waInstance{GREEN_API_INSTANCE}"
         f"/showMessagesQueue/{GREEN_API_TOKEN}"
     )
     r = requests.get(url, timeout=15)
@@ -2193,7 +2198,7 @@ def send_whatsapp(message: str):
         )
 
     url = (
-        f"https://api.green-api.com/waInstance{GREEN_API_INSTANCE}"
+        f"{GREEN_API_URL}/waInstance{GREEN_API_INSTANCE}"
         f"/sendMessage/{GREEN_API_TOKEN}"
     )
     # linkPreview=False מבטל את כרטיס התצוגה-המקדימה ש-WhatsApp מייצר

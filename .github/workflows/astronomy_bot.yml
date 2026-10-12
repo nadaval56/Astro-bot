@@ -81,6 +81,7 @@ jobs:
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}   # גיבוי
           GREEN_API_INSTANCE:  ${{ secrets.GREEN_API_INSTANCE }}
           GREEN_API_TOKEN:     ${{ secrets.GREEN_API_TOKEN }}
+          GREEN_API_URL:       ${{ secrets.GREEN_API_URL }}   # אופציונלי: apiUrl מהקונסול
           WHATSAPP_GROUP_ID:   ${{ secrets.WHATSAPP_GROUP_ID }}
           TEST_MODE:           ${{ github.event.inputs.test_mode }}
           FORCE_SEND:          ${{ github.event.inputs.force_send }}

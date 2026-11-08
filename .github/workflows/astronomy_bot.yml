@@ -53,6 +53,12 @@ jobs:
                           # + ~25 דק' ריצה (מאז 5-series כל קריאה כוללת חשיבה)
     permissions:
       contents: write   # נדרש לשמירת message_history.json
+    # 🔒 ריצה אחת בכל פעם: ב-8.11.2026 ריצת בוקר שהתעכבה התחילה 4 דק' אחרי
+    #    הפעלה ידנית, לפני שזו שמרה היסטוריה – ונשלחה הודעה כפולה.
+    #    ריצה נוספת ממתינה בתור עד שהקודמת מסיימת (ושומרת היסטוריה).
+    concurrency:
+      group: astronomy-bot
+      cancel-in-progress: false
 
     steps:
       - name: ⬇️ Checkout
@@ -74,6 +80,11 @@ jobs:
       # ANTHROPIC_API_KEY נשאר כגיבוי בלבד, אם ה-CLI נכשל.
       - name: 🤖 התקנת Claude Code
         run: npm install -g @anthropic-ai/claude-code
+
+      # ה-checkout מקבע את הקומיט מרגע ההפעלה; ריצה שחיכתה בתור לא רואה
+      # את ההיסטוריה שריצה קודמת שמרה. מושכים את main העדכני רגע לפני הבוט.
+      - name: 🔄 משיכת היסטוריה עדכנית
+        run: git pull --ff-only origin main
 
       - name: 🔭 הרצת בוט האסטרונומיה
         env:
